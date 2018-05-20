@@ -18,9 +18,16 @@
 """Generic Node base class for all workers that run on hosts."""
 
 
+import datetime
 import inspect
 import os
 import random
+import signal
+import six
+try:
+    from tsconfig import tsconfig
+except ImportError:
+    tsconfig = type("", (), dict(VOLATILE_PATH=""))
 
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -48,6 +55,8 @@ from cinder import rpc
 from cinder import version
 from cinder.volume import utils as vol_utils
 
+from sqlalchemy.event import listens_for
+from sqlalchemy.pool import Pool
 
 LOG = logging.getLogger(__name__)
 
@@ -203,6 +212,57 @@ class Service(service.Service):
         self.rpcserver = None
         self.backend_rpcserver = None
         self.cluster_rpcserver = None
+
+    # Monitor Sql QueuePool events
+    # associate listener with all instances of Pool
+    # Called at the moment a particular DBAPI connection is first created.
+    @listens_for(Pool, 'connect')
+    def receive_connect(dbapi_connection, connection_record):
+        # this requires property pool_info to be added to _ConnectionRecord
+        if hasattr(connection_record, 'pool_info'):
+            LOG.debug("Create connection %s", connection_record.pool_info)
+        else:
+            LOG.debug("Create %s, %s",
+                      dbapi_connection, connection_record.info)
+
+    # Called when a connection is retrieved from the Pool.
+    @listens_for(Pool, 'checkout')
+    def receive_checkout(dbapi_connection, connection_record,
+                         connection_proxy):
+        if hasattr(connection_record, 'pool_info'):
+            LOG.debug("Checkout connection %s", connection_record.pool_info)
+        else:
+            LOG.debug("Checkout %s, %s",
+                      dbapi_connection, connection_record.info)
+
+    # Called when a connection returns to the pool.
+    @listens_for(Pool, 'checkin')
+    def receive_checkin(dbapi_connection, connection_record):
+        if hasattr(connection_record, 'pool_info'):
+            LOG.debug("Checkin connection %s", connection_record.pool_info)
+        else:
+            LOG.debug("Checkin %s, %s",
+                      dbapi_connection, connection_record.info)
+
+    # Called when a DBAPI connection is to be invalidated.
+    # The event occurs before a final attempt to call .close().
+    @listens_for(Pool, 'invalidate')
+    def receive_invalidate(dbapi_connection, connection_record, exception):
+        if hasattr(connection_record, 'pool_info'):
+            LOG.debug("Invalidate connection %s, exception: %s",
+                      connection_record.pool_info, exception)
+        else:
+            LOG.debug("Invalidate %s, %s, exception: %s",
+                      dbapi_connection, connection_record.info, exception)
+
+    # Called before the reset action occurs for a pooled connection.
+    @listens_for(Pool, 'reset')
+    def receive_reset(dbapi_connection, connection_record):
+        if hasattr(connection_record, 'pool_info'):
+            LOG.debug("Reset connection %s", connection_record.pool_info)
+        else:
+            LOG.debug("Reset %s, %s",
+                      dbapi_connection, connection_record.info)
 
     def start(self):
         version_string = version.version_string()
@@ -408,28 +468,26 @@ class Service(service.Service):
         except Exception:
             pass
 
-        self.timers_skip = []
         for x in self.timers:
             try:
                 x.stop()
             except Exception:
-                self.timers_skip.append(x)
+                pass
 
         if self.coordination:
             try:
                 coordination.COORDINATOR.stop()
             except Exception:
                 pass
+        self.timers = []
         super(Service, self).stop(graceful=True)
 
     def wait(self):
-        skip = getattr(self, 'timers_skip', [])
         for x in self.timers:
-            if x not in skip:
-                try:
-                    x.wait()
-                except Exception:
-                    pass
+            try:
+                x.wait()
+            except Exception:
+                pass
         if self.rpcserver:
             self.rpcserver.wait()
         if self.backend_rpcserver:
@@ -472,6 +530,7 @@ class Service(service.Service):
                 service_ref.availability_zone = self.availability_zone
 
             service_ref.save()
+            self.update_service_down_after(service_ref)
 
             # TODO(termie): make this pattern be more elegant.
             if getattr(self, 'model_disconnected', False):
@@ -498,6 +557,26 @@ class Service(service.Service):
     def reset(self):
         self.manager.reset()
         super(Service, self).reset()
+
+    @staticmethod
+    def update_service_down_after(service_ref):
+        # Use:
+        #   [[ "$(date -u +'%Y-%m-%d %H:%M:%S.%N')"
+        #      < "$(cat /var/run/cinder-volume.down-after)" ]]
+        # from cinder volume monitoring script to check service is up
+        new_file = os.path.join(tsconfig.VOLATILE_PATH,
+                                '{}.down-after.new'.format(service_ref.binary))
+        try:
+            with open(new_file, 'w') as update:
+                update.write(
+                    (service_ref.updated_at + datetime.timedelta(
+                        seconds=CONF.service_down_time)
+                     ).strftime("%Y-%m-%d %H:%M:%S.%f"))
+            os.rename(new_file,
+                      os.path.join(tsconfig.VOLATILE_PATH,
+                                   '{}.down-after'.format(service_ref.binary)))
+        except Exception as e:
+            LOG.error('Update service state failed: %s', six.text_type(e))
 
 
 class WSGIService(service.ServiceBase):
@@ -578,6 +657,10 @@ class WSGIService(service.ServiceBase):
 
         """
         self.server.stop()
+
+        # SIGALM is registered in oslo_service to force shutdown
+        # delay 1 second to allow stop to complete normally
+        signal.alarm(1)
 
     def wait(self):
         """Wait for the service to stop serving this API.

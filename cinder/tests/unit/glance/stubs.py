@@ -103,7 +103,7 @@ class StubGlanceClient(object):
                 return
         raise glanceclient.exc.NotFound(image_id)
 
-    def upload(self, image_id, data):
+    def upload(self, image_id, data, image_size):
         for i, image in enumerate(self._images):
             if image.id == image_id:
                 setattr(self._images[i], 'size', len(data))

@@ -30,6 +30,7 @@ from six import moves
 from cinder import exception
 from cinder import utils
 
+from cinder.exception import LVMBackingStoreIsBusy
 
 LOG = logging.getLogger(__name__)
 
@@ -515,15 +516,26 @@ class LVM(executor.Executor):
 
         vg_pool_name = '%s/%s' % (self.vg_name, name)
 
+        # Leaving 5% is too much for large disks but using 100%
+        # is even worse as we have to leave space for metadata expansion and
+        # recovery (manual or automatic).
         if not size_str:
-            size_str = self._calculate_thin_pool_size()
-
-        cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-L', size_str,
-                                    vg_pool_name]
-        LOG.debug("Creating thin pool '%(pool)s' with size %(size)s of "
-                  "total %(free)sg", {'pool': vg_pool_name,
-                                      'size': size_str,
-                                      'free': self.vg_free_space})
+            size_str = '+99%FREE'  # percent of VG free space to allocate
+            mda_size_str = '1G'
+            cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-l', size_str,
+                                        '--poolmetadatasize', mda_size_str,
+                                        vg_pool_name]
+        else:
+            mda_size_str = '(lvm autosized)'
+            cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-L', size_str,
+                                        vg_pool_name]
+        LOG.info(("Creating thin pool '%(pool)s' using %(size)s of VG "
+                  "of which metadata size is %(meta)s from a "
+                  "total of %(free)sg"),
+                 {'pool': vg_pool_name,
+                  'size': size_str,
+                  'meta': mda_size_str,
+                  'free': self.vg_free_space})
 
         self._execute(*cmd,
                       root_helper=self._root_helper,
@@ -721,11 +733,11 @@ class LVM(executor.Executor):
                 '%s/%s' % (self.vg_name, name),
                 root_helper=self._root_helper, run_as_root=True)
         except putils.ProcessExecutionError as err:
-            LOG.debug('Error reported running lvremove: CMD: %(command)s, '
-                      'RESPONSE: %(response)s',
-                      {'command': err.cmd, 'response': err.stderr})
+            LOG.info(('Error reported running lvremove: CMD: %(command)s, '
+                      'RESPONSE: %(response)s'),
+                     {'command': err.cmd, 'response': err.stderr})
 
-            LOG.debug('Attempting udev settle and retry of lvremove...')
+            LOG.info('Attempting udev settle and retry of lvremove...')
             run_udevadm_settle()
 
             # The previous failing lvremove -f might leave behind
@@ -734,12 +746,39 @@ class LVM(executor.Executor):
             # Therefore we need to skip suspended devices on retry.
             LVM_CONFIG += 'devices { ignore_suspended_devices = 1}'
 
-            self._execute(
-                'lvremove',
-                '--config', LVM_CONFIG,
-                '-f',
-                '%s/%s' % (self.vg_name, name),
-                root_helper=self._root_helper, run_as_root=True)
+            try:
+                self._execute(
+                    'lvremove',
+                    '--config', LVM_CONFIG,
+                    '-f',
+                    '%s/%s' % (self.vg_name, name),
+                    root_helper=self._root_helper, run_as_root=True)
+            except putils.ProcessExecutionError as err:
+                if all(x in err.stderr for x in ['Logical volume', 'in use']):
+                    # Get pids that keeps volume or snapshot open
+                    mapper = "/dev/mapper/cinder--volumes-" + \
+                        name.replace("-", "--")
+                    root_helper = self._root_helper
+                    (stdout, __) = putils.trycmd('fuser', mapper,
+                                                 root_helper=root_helper,
+                                                 run_as_root=True)
+                    # Upon a successful run, 'fuser' will output the file name
+                    # to stderr and the PIDs using the file to stdout. Hence we
+                    # only need to split stdout into the pids list, no need to
+                    # slice stdout for removing the file name
+                    pids = stdout.split()
+                    # Get process names that keep our volume or snapshot open
+                    procs = []
+                    for pid in pids:
+                        pid = pid.strip()
+                        (name, __) = putils.trycmd('ps', '-co', 'cmd= ', pid,
+                                                   root_helper=root_helper,
+                                                   run_as_root=True)
+                        procs.append("%s (pid: %s)" % (name.rstrip(), pid))
+
+                    raise LVMBackingStoreIsBusy(backing_vol=mapper,
+                                                procs=", ".join(procs))
+                raise
             LOG.debug('Successfully deleted volume: %s after '
                       'udev settle.', name)
 

@@ -18,10 +18,14 @@
 
 
 import math
+import sys
 
+from oslo_db import exception as db_exc
 from oslo_log import log as logging
 
+import cinder.exception as exception
 from cinder.scheduler import filters
+from cinder.volume import utils as volume_utils
 
 
 LOG = logging.getLogger(__name__)
@@ -67,8 +71,19 @@ class CapacityFilter(filters.BaseBackendFilter):
 
         if backend_state.free_capacity_gb is None:
             # Fail Safe
-            LOG.error("Free capacity not set: "
+            errmsg = ("Free capacity not set: "
                       "volume node info collection broken.")
+            try:
+                volume_utils.update_volume_fault(
+                    filter_properties.get('context'),
+                    filter_properties.get(
+                        'request_spec', {}).get('volume_id', {}),
+                    errmsg, sys.exc_info())
+            except exception.VolumeNotFound:
+                LOG.error("Volume not found")
+            except db_exc.DBError:
+                LOG.error("Database error")
+            LOG.error(errmsg)
             return False
 
         free_space = backend_state.free_capacity_gb
@@ -95,12 +110,23 @@ class CapacityFilter(filters.BaseBackendFilter):
             return False
         total = float(total_space)
         if total <= 0:
-            LOG.warning("Insufficient free space for volume creation. "
-                        "Total capacity is %(total).2f on %(grouping)s "
-                        "%(grouping_name)s.",
-                        {"total": total,
-                         "grouping": grouping,
-                         "grouping_name": backend_state.backend_id})
+            errmsg = ("Insufficient free space for volume creation. "
+                      "Total capacity is %(total).2f on %(grouping)s."
+                      "%(grouping_name)s.")
+            msg_args = {"total": total,
+                        "grouping": grouping,
+                        "grouping_name": backend_state.backend_id}
+            try:
+                volume_utils.update_volume_fault(
+                    filter_properties.get('context'),
+                    filter_properties.get(
+                        'request_spec', {}).get('volume_id', {}),
+                    errmsg % msg_args, sys.exc_info())
+            except exception.VolumeNotFound:
+                LOG.error("Volume not found")
+            except db_exc.DBError:
+                LOG.error("Database error")
+            LOG.warning(errmsg, msg_args)
             return False
 
         # Calculate how much free space is left after taking into account
@@ -133,12 +159,23 @@ class CapacityFilter(filters.BaseBackendFilter):
                     "grouping": grouping,
                     "grouping_name": backend_state.backend_id,
                 }
-                LOG.warning(
+                errmsg = (
                     "Insufficient free space for thin provisioning. "
                     "The ratio of provisioned capacity over total capacity "
                     "%(provisioned_ratio).2f has exceeded the maximum over "
                     "subscription ratio %(oversub_ratio).2f on %(grouping)s "
-                    "%(grouping_name)s.", msg_args)
+                    "%(grouping_name)s.")
+                try:
+                    volume_utils.update_volume_fault(
+                        filter_properties.get('context'),
+                        filter_properties.get(
+                            'request_spec', {}).get('volume_id', {}),
+                        errmsg % msg_args, sys.exc_info())
+                except exception.VolumeNotFound:
+                    LOG.error("Volume not found")
+                except db_exc.DBError:
+                    LOG.error("Database error")
+                LOG.warning(errmsg, msg_args)
                 return False
             else:
                 # Thin provisioning is enabled and projected over-subscription
@@ -177,10 +214,20 @@ class CapacityFilter(filters.BaseBackendFilter):
                     "available": free}
 
         if free < requested_size:
-            LOG.warning("Insufficient free space for volume creation "
-                        "on %(grouping)s %(grouping_name)s (requested / "
-                        "avail): %(requested)s/%(available)s",
-                        msg_args)
+            errmsg = ("Insufficient free space for volume creation "
+                      "on %(grouping)s %(grouping_name)s (requested / "
+                      "avail): %(requested)s/%(available)s")
+            try:
+                volume_utils.update_volume_fault(
+                    filter_properties.get('context'),
+                    filter_properties.get(
+                        'request_spec', {}).get('volume_id', {}),
+                    errmsg % msg_args, sys.exc_info())
+            except exception.VolumeNotFound:
+                LOG.error("Volume not found")
+            except db_exc.DBError:
+                LOG.error("Database error")
+            LOG.warning(errmsg, msg_args)
             return False
 
         LOG.debug("Space information for volume creation "

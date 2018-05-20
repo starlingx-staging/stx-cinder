@@ -18,6 +18,7 @@ Manage backends in the current zone.
 """
 
 import collections
+import six
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -196,7 +197,10 @@ class BackendState(object):
         self.update_capabilities(capability, service)
 
         if capability:
-            if self.updated and self.updated > capability['timestamp']:
+            timestamp = capability['timestamp']
+            if isinstance(timestamp, six.string_types):
+                timestamp = timeutils.parse_strtime(timestamp)
+            if self.updated and self.updated > timestamp:
                 return
 
             # Update backend level info
@@ -286,7 +290,10 @@ class BackendState(object):
         self.vendor_name = capability.get('vendor_name', None)
         self.driver_version = capability.get('driver_version', None)
         self.storage_protocol = capability.get('storage_protocol', None)
-        self.updated = capability['timestamp']
+        timestamp = capability['timestamp']
+        if isinstance(timestamp, six.string_types):
+            timestamp = timeutils.parse_strtime(timestamp)
+        self.updated = timestamp
 
     def consume_from_volume(self, volume):
         """Incrementally update host state from a volume."""
@@ -326,7 +333,10 @@ class PoolState(BackendState):
         """Update information about a pool from its volume_node info."""
         self.update_capabilities(capability, service)
         if capability:
-            if self.updated and self.updated > capability['timestamp']:
+            timestamp = capability['timestamp']
+            if isinstance(timestamp, six.string_types):
+                timestamp = timeutils.parse_strtime(timestamp)
+            if self.updated and self.updated > timestamp:
                 return
             self.update_backend(capability)
 
@@ -472,6 +482,8 @@ class HostManager(object):
         # TODO(geguileo): In P - Remove the next line since we receive the
         # timestamp
         timestamp = timestamp or timeutils.utcnow()
+        if isinstance(timestamp, six.string_types):
+            timestamp = timeutils.parse_strtime(timestamp)
         # Copy the capabilities, so we don't modify the original dict
         capab_copy = dict(capabilities)
         capab_copy["timestamp"] = timestamp
@@ -520,6 +532,8 @@ class HostManager(object):
         updated = []
         capa_new = self.service_states.get(backend, {})
         timestamp = timestamp or timeutils.utcnow()
+        if isinstance(timestamp, six.string_types):
+            timestamp = timeutils.parse_strtime(timestamp)
 
         # Compare the capabilities and timestamps to decide notifying
         if not capa_new:

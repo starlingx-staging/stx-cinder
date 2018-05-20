@@ -11,6 +11,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2014, 2017 Wind River Systems, Inc.
+#
 
 
 from cinder.common import constants
@@ -495,3 +498,21 @@ class VolumeAPI(rpc.RPCAPI):
         cctxt = self._get_cctxt(group.host, version='3.14')
         return cctxt.call(ctxt, 'list_replication_targets',
                           group=group)
+
+    def export_volume(self, ctxt, volume):
+        version = self._compat_ver('3.0', '2.0')
+        cctxt = self._get_cctxt(volume.host, version)
+        cctxt.cast(ctxt, 'export_volume', volume_id=volume.id)
+
+    def import_volume(self, ctxt, volume, file_name):
+        version = self._compat_ver('3.0', '2.0')
+        cctxt = self._get_cctxt(volume.host, version)
+        cctxt.cast(ctxt, 'import_volume',
+                   volume_id=volume.id, file_name=file_name)
+
+    def export_snapshot(self, ctxt, snapshot, volume):
+        version = self._compat_ver('3.0', '2.0')
+        cctxt = self._get_cctxt(volume.host, version)
+        cctxt.cast(ctxt, 'export_snapshot',
+                   snapshot_id=snapshot.id,
+                   volume_id=volume.id)

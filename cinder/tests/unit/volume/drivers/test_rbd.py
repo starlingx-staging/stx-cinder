@@ -2049,7 +2049,7 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
                          [{'url': 'rbd://bee/bi/bo/bum'},
                           {'url': 'rbd://fee/fi/fo/fum'}])
             volume = {'name': 'vol1'}
-            image_meta = mock.sentinel.image_meta
+            image_meta = {}
             image_service = mock.sentinel.image_service
 
             actual = driver.clone_image(self.context,
@@ -2080,7 +2080,7 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
                           {'url': 'rbd://fee/fi/fo/fum'}])
 
             volume = {'name': 'vol1'}
-            image_meta = mock.sentinel.image_meta
+            image_meta = {}
             image_service = mock.sentinel.image_service
             actual = driver.clone_image(self.context,
                                         volume,
@@ -2096,3 +2096,42 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
                                               image_meta)
             self.assertFalse(mock_clone.called)
             self.assertFalse(mock_resize.called)
+
+    def test_clone_multilocation_with_raw_cache(self):
+        expected = ({'provider_location': None}, True)
+        driver = self.volume.driver
+
+        def cloneable_side_effect(url_location, image_meta):
+            return url_location == 'rbd://mee/mi/mo/mum'
+
+        with mock.patch.object(self.volume.driver, '_is_cloneable') \
+            as mock_is_cloneable, \
+            mock.patch.object(self.volume.driver, '_clone') as mock_clone, \
+            mock.patch.object(self.volume.driver, '_resize') \
+                as mock_resize:
+            mock_is_cloneable.side_effect = cloneable_side_effect
+            mock_clone.return_value = {}
+            image_loc = ('rbd://bee/bi/bo/bum',
+                         [{'url': 'rbd://bee/bi/bo/bum'},
+                          {'url': 'rbd://fee/fi/fo/fum'}])
+            volume = {'name': 'vol1'}
+            image_meta = {'properties': {
+                'cache_raw': 'True',
+                'cache_raw_status': 'Cached',
+                'cache_raw_url': 'rbd://mee/mi/mo/mum'}
+            }
+            image_service = mock.sentinel.image_service
+
+            actual = driver.clone_image(self.context,
+                                        volume,
+                                        image_loc,
+                                        image_meta,
+                                        image_service)
+
+            self.assertEqual(expected, actual)
+            self.assertEqual(1, mock_is_cloneable.call_count)
+            mock_clone.assert_called_once_with(volume,
+                                               'mi', 'mo', 'mum')
+            mock_is_cloneable.assert_called_with('rbd://mee/mi/mo/mum',
+                                                 image_meta)
+            mock_resize.assert_called_once_with(volume)

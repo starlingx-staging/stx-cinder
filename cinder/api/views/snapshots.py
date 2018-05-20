@@ -12,8 +12,12 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 from cinder.api import common
+from cinder.volume import utils as volume_utils
 
 
 class ViewBuilder(common.ViewBuilder):
@@ -53,6 +57,7 @@ class ViewBuilder(common.ViewBuilder):
                 'status': snapshot.status,
                 'size': snapshot.volume_size,
                 'metadata': metadata,
+                'error': self._get_snapshot_fault(request, snapshot)
             }
         }
 
@@ -76,3 +81,18 @@ class ViewBuilder(common.ViewBuilder):
             snapshots_dict[self._collection_name + '_links'] = snapshots_links
 
         return snapshots_dict
+
+    def _get_snapshot_fault(self, request, snapshot):
+        msg = ""
+        # Decoupling fault conditions from only being displayed when the
+        # snapshot is only in the error state. We have scenarios where a fault
+        # occurs (like snapshot in use) where we won't land in an error state.
+        # We might be in an error_deleting or available state. So if we've had
+        # a fault populated for the snapshot, populate it for displaying to the
+        # user.
+        fault = volume_utils.get_snapshot_fault(
+            request.environ['cinder.context'],
+            snapshot.id)
+        if fault:
+            msg = fault.get('message')
+        return msg

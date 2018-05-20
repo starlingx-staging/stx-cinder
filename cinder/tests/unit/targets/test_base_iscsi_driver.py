@@ -165,3 +165,50 @@ class TestBaseISCSITargetDriver(tf.TargetDriverFixture):
                                                            self.testvol))
         self.target.db.volume_get.assert_called_once_with(
             ctxt, self.testvol['id'])
+
+    @mock.patch.object(iscsi.LOG, 'info')
+    def test_create_export_logs(self, mock_log_info):
+        ctxt = context.get_admin_context()
+        self.target.create_export(ctxt, self.testvol,
+                                  self.fake_volumes_dir)
+        self.assertNotEqual(
+            [],
+            [args for args, kwargs in mock_log_info.call_args_list
+             if args[0].startswith('Creating volume export for')])
+        self.assertNotEqual(
+            [],
+            [args for args, kwargs in mock_log_info.call_args_list
+             if args[0].startswith('Volume export for %s created')])
+
+    @mock.patch.object(iscsi.LOG, 'info')
+    def test_ensure_export_logs(self, mock_log_info):
+        ctxt = context.get_admin_context()
+        self.target.ensure_export(ctxt, self.testvol,
+                                  self.fake_volumes_dir)
+        self.assertNotEqual(
+            [],
+            [args for args, kwargs in mock_log_info.call_args_list
+             if args[0].startswith('Recreating volume export for')])
+        self.assertNotEqual(
+            [],
+            [args for args, kwargs in mock_log_info.call_args_list
+             if args[0].startswith('Volume export for %s created')])
+
+    @mock.patch.object(iscsi.LOG, 'info')
+    def test_remove_export_logs(self, mock_log_info):
+        with mock.patch.object(self.target, '_get_target_and_lun') as \
+                mock_get_target,\
+                mock.patch.object(self.target, 'show_target'),\
+                mock.patch.object(self.target, 'remove_iscsi_target'):
+            mock_get_target.return_value = (0, 1)
+            iscsi_target, lun = mock_get_target.return_value
+            ctxt = context.get_admin_context()
+            self.target.remove_export(ctxt, self.testvol)
+            self.assertNotEqual(
+                [],
+                [args for args, kwargs in mock_log_info.call_args_list
+                 if args[0].startswith('Removing volume export for')])
+            self.assertNotEqual(
+                [],
+                [args for args, kwargs in mock_log_info.call_args_list
+                 if args[0].startswith('Volume export for %s removed')])

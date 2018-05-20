@@ -21,6 +21,7 @@ import ddt
 import glanceclient.exc
 import mock
 from oslo_config import cfg
+from oslo_utils import units
 
 from cinder import context
 from cinder import exception
@@ -36,6 +37,12 @@ class NullWriter(object):
     """Used to test ImageService.get which takes a writer object."""
 
     def write(self, *arg, **kwargs):
+        pass
+
+    def fileno(self, *arg, **kwargs):
+        return 11
+
+    def flush(self):
         pass
 
 
@@ -421,7 +428,8 @@ class TestGlanceImageService(test.TestCase):
         self.assertDictEqual(image_meta, ret)
         if ver == 2:
             client.call.assert_called_once_with(
-                self.context, 'update', image_id, k1='v1', remove_props=['k2'])
+                self.context, 'update', image_id, k1='v1', remove_props=['k2'],
+                size=0)
         else:
             client.call.assert_called_once_with(
                 self.context, 'update', image_id, properties={'k1': 'v1'},
@@ -555,6 +563,86 @@ class TestGlanceImageService(test.TestCase):
         tries = [0]
         self.flags(glance_num_retries=1)
         service.download(self.context, image_id, writer)
+
+    def test_nicer_download(self):
+
+        class MyGlanceStubClient(glance_stubs.StubGlanceClient):
+
+            def __init__(self, images=None, chunk_size=0):
+                self.chunk_size = chunk_size
+                super(MyGlanceStubClient, self).__init__(images)
+
+            def data(self, image_id):
+                image_size = getattr(self.get(image_id), 'size', 0)
+                result = []
+                if not self.chunk_size:
+                    chunk_size = image_size
+                else:
+                    chunk_size = self.chunk_size
+                while image_size > 0:
+                    result.append('*' * min(image_size, chunk_size))
+                    image_size -= chunk_size
+                return result
+
+        chunk_count = 4
+        chunk_size = 1 * units.Mi
+        self.override_config('glance_download_fdatasync_interval_mib',
+                             chunk_size / units.Mi * 2)
+        client = MyGlanceStubClient(chunk_size=chunk_size)
+        fixture = self._make_fixture(
+            name='image10', is_public=True,
+            size=chunk_size * chunk_count)
+        service = self._create_image_service(client)
+        image_id = service.create(self.context, fixture)['id']
+        writer = NullWriter()
+        with mock.patch('time.sleep') as mock_sleep, \
+                mock.patch('os.fdatasync') as mock_fdatasync, \
+                mock.patch.object(writer, 'write') as mock_write, \
+                mock.patch.object(writer, 'flush') as mock_flush:
+            service.download(self.context, image_id, writer)
+            self.assertEqual(mock_sleep.call_count, chunk_count)
+            self.assertEqual(mock_write.call_count, chunk_count)
+            self.assertEqual(mock_flush.call_count, chunk_count / 2)
+            self.assertEqual(mock_fdatasync.call_count, chunk_count / 2)
+
+    def test_nicer_download_no_fdatasync(self):
+
+        class MyGlanceStubClient(glance_stubs.StubGlanceClient):
+            def __init__(self, images=None, chunk_size=0):
+                self.chunk_size = chunk_size
+                super(MyGlanceStubClient, self).__init__(images)
+
+            def data(self, image_id):
+                image_size = getattr(self.get(image_id), 'size', 0)
+                result = []
+                if not self.chunk_size:
+                    chunk_size = image_size
+                else:
+                    chunk_size = self.chunk_size
+                while image_size > 0:
+                    result.append('*' * min(image_size, chunk_size))
+                    image_size -= chunk_size
+                return result
+
+        chunk_count = 4
+        chunk_size = units.Mi
+        self.override_config('glance_download_fdatasync_interval_mib', 0)
+        client = MyGlanceStubClient(chunk_size=chunk_size)
+        fixture = self._make_fixture(
+            name='image10', is_public=True,
+            size=chunk_size * chunk_count)
+        service = self._create_image_service(client)
+        image_id = service.create(self.context, fixture)['id']
+        writer = NullWriter()
+        with mock.patch('time.sleep') as mock_sleep, \
+                mock.patch('os.fdatasync') as mock_fdatasync, \
+                mock.patch.object(writer, 'write') as mock_write, \
+                mock.patch.object(writer, 'flush') as mock_flush:
+            service.download(self.context, image_id, writer)
+            self.assertEqual(mock_sleep.call_count, chunk_count)
+            self.assertEqual(mock_write.call_count, chunk_count)
+            mock_flush.assert_not_called()
+            mock_fdatasync.assert_not_called()
 
     def test_client_forbidden_converts_to_imagenotauthed(self):
         class MyGlanceStubClient(glance_stubs.StubGlanceClient):

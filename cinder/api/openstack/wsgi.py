@@ -815,9 +815,9 @@ class Resource(wsgi.Application):
     def __call__(self, request):
         """WSGI method that controls (de)serialization and method dispatch."""
 
-        LOG.info("%(method)s %(url)s",
-                 {"method": request.method,
-                  "url": request.url})
+        LOG.debug("%(method)s %(url)s",
+                  {"method": request.method,
+                   "url": request.url})
 
         if self.support_api_request_version:
             # Set the version of the API requested based on the header
@@ -942,7 +942,7 @@ class Resource(wsgi.Application):
             msg_dict = dict(url=request.url, e=e)
             msg = "%(url)s returned a fault: %(e)s"
 
-        LOG.info(msg, msg_dict)
+        LOG.debug(msg, msg_dict)
 
         if hasattr(response, 'headers'):
             for hdr, val in response.headers.items():

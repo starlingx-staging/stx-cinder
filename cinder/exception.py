@@ -1435,3 +1435,23 @@ class ErrorInParsingArguments(VolumeDriverException):
 # GPFS driver
 class GPFSDriverUnsupportedOperation(VolumeBackendAPIException):
     message = _("GPFS driver unsupported operation: %(msg)s")
+
+
+class LVMBackingStoreIsBusy(CinderException):
+    # Backing store can be an LVM 'volume' or a 'snapshot'
+    message = _("The LVM backing store "
+                "%(backing_vol)s is still used by: "
+                "%(procs)s.")
+
+
+class LVMThinPoolCapacityError(CinderException):
+    message = _("Insufficient free space for thin provisioning. "
+                "The ratio of provisioned capacity over total capacity "
+                "%(provisioned_ratio).2f has exceeded the maximum over "
+                "subscription ratio %(oversub_ratio).2f on host "
+                "%(host)s.")
+
+
+class InsufficientConversionSpace(CinderException):
+    message = _("Insufficient free space on %(location)s "
+                "for image download and conversion.")

@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 """The volumes snapshots api."""
 
@@ -21,9 +24,10 @@ from webob import exc
 
 from cinder.api.openstack import wsgi
 from cinder.api.v2 import snapshots as snapshots_v2
+from cinder.volume import utils as volume_utils
 
 
-def _snapshot_v2_to_v1(snapv2_result):
+def _snapshot_v2_to_v1(context, snapv2_result):
     """Transform a v2 snapshot dict to v1."""
     snapshots = snapv2_result.get('snapshots')
     if snapshots is None:
@@ -36,6 +40,9 @@ def _snapshot_v2_to_v1(snapv2_result):
         # Name and description were renamed
         snapv1['display_name'] = snapv1.pop('name', '')
         snapv1['display_description'] = snapv1.pop('description', '')
+        fault = volume_utils.get_snapshot_fault(context, snapv1['id'])
+        if fault:
+            snapv1['error'] = fault.get('message')
 
     return snapv2_result
 
@@ -58,17 +65,19 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
     def show(self, req, id):
         """Return data about the given snapshot."""
         result = super(SnapshotsController, self).show(req, id)
-        return _snapshot_v2_to_v1(result)
+        return _snapshot_v2_to_v1(req.environ['cinder.context'], result)
 
     def index(self, req):
         """Returns a summary list of snapshots."""
         return _snapshot_v2_to_v1(
+            req.environ['cinder.context'],
             super(SnapshotsController, self).index(
                 _update_search_opts(req)))
 
     def detail(self, req):
         """Returns a detailed list of snapshots."""
         return _snapshot_v2_to_v1(
+            req.environ['cinder.context'],
             super(SnapshotsController, self).detail(
                 _update_search_opts(req)))
 
@@ -90,12 +99,14 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
             body['snapshot']['metadata'] = {}
 
         return _snapshot_v2_to_v1(
+            req.environ['cinder.context'],
             super(SnapshotsController, self).create(req, body))
 
     def update(self, req, id, body):
         """Update a snapshot."""
         try:
             return _snapshot_v2_to_v1(
+                req.environ['cinder.context'],
                 super(SnapshotsController, self).update(req, id, body))
         except exc.HTTPBadRequest:
             raise exc.HTTPUnprocessableEntity()

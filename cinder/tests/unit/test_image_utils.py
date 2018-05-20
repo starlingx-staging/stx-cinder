@@ -137,9 +137,10 @@ class TestConvertImage(test.TestCase):
                                                throttle=throttle)
 
             self.assertIsNone(output)
-            mock_exec.assert_called_once_with('cgcmd', 'qemu-img', 'convert',
-                                              '-t', 'none', '-O', out_format,
-                                              source, dest, run_as_root=True)
+            mock_exec.assert_called_once_with(
+                'cgcmd', 'qemu-img', 'convert',
+                '-t', 'none', '-W', '-O', out_format,
+                source, dest, run_as_root=True)
 
         mock_exec.reset_mock()
 
@@ -148,9 +149,10 @@ class TestConvertImage(test.TestCase):
             output = image_utils.convert_image(source, dest, out_format)
 
             self.assertIsNone(output)
-            mock_exec.assert_called_once_with('qemu-img', 'convert',
-                                              '-O', out_format, source, dest,
-                                              run_as_root=True)
+            mock_exec.assert_called_once_with(
+                'qemu-img', 'convert',
+                '-W', '-O', out_format, source, dest,
+                run_as_root=True)
 
     @mock.patch('cinder.image.image_utils.qemu_img_info')
     @mock.patch('cinder.utils.execute')
@@ -171,9 +173,10 @@ class TestConvertImage(test.TestCase):
 
             mock_info.assert_called_once_with(source, run_as_root=True)
             self.assertIsNone(output)
-            mock_exec.assert_called_once_with('cgcmd', 'qemu-img', 'convert',
-                                              '-t', 'none', '-O', out_format,
-                                              source, dest, run_as_root=True)
+            mock_exec.assert_called_once_with(
+                'cgcmd', 'qemu-img', 'convert',
+                '-t', 'none', '-W', '-O', out_format,
+                source, dest, run_as_root=True)
 
         mock_exec.reset_mock()
 
@@ -182,9 +185,10 @@ class TestConvertImage(test.TestCase):
             output = image_utils.convert_image(source, dest, out_format)
 
             self.assertIsNone(output)
-            mock_exec.assert_called_once_with('qemu-img', 'convert',
-                                              '-O', out_format, source, dest,
-                                              run_as_root=True)
+            mock_exec.assert_called_once_with(
+                'qemu-img', 'convert',
+                '-W', '-O', out_format, source, dest,
+                run_as_root=True)
 
     @mock.patch('cinder.volume.utils.check_for_odirect_support',
                 return_value=True)
@@ -203,9 +207,10 @@ class TestConvertImage(test.TestCase):
         output = image_utils.convert_image(source, dest, out_format)
 
         self.assertIsNone(output)
-        mock_exec.assert_called_once_with('qemu-img', 'convert', '-O',
-                                          out_format, source, dest,
-                                          run_as_root=True)
+        mock_exec.assert_called_once_with(
+            'qemu-img', 'convert', '-W', '-O',
+            out_format, source, dest,
+            run_as_root=True)
 
     @mock.patch('cinder.volume.utils.check_for_odirect_support',
                 return_value=True)
@@ -225,9 +230,10 @@ class TestConvertImage(test.TestCase):
         output = image_utils.convert_image(source, dest, out_format)
 
         self.assertIsNone(output)
-        mock_exec.assert_called_once_with('qemu-img', 'convert', '-O',
-                                          out_format, source, dest,
-                                          run_as_root=True)
+        mock_exec.assert_called_once_with(
+            'qemu-img', 'convert', '-W', '-O',
+            out_format, source, dest,
+            run_as_root=True)
 
     @mock.patch('cinder.image.image_utils.qemu_img_info')
     @mock.patch('cinder.utils.execute')
@@ -245,9 +251,41 @@ class TestConvertImage(test.TestCase):
                                                src_format='AMI')
 
             self.assertIsNone(output)
-            mock_exec.assert_called_once_with('qemu-img', 'convert',
-                                              '-t', 'none', '-O', out_format,
-                                              source, dest, run_as_root=True)
+            mock_exec.assert_called_once_with(
+                'qemu-img', 'convert',
+                '-t', 'none', '-W', '-O', out_format,
+                source, dest, run_as_root=True)
+
+    @mock.patch('cinder.image.image_utils.CONF')
+    @mock.patch('cinder.volume.utils.check_for_odirect_support',
+                return_value=True)
+    @mock.patch('cinder.image.image_utils.qemu_img_info')
+    @mock.patch('cinder.utils.execute')
+    @mock.patch('cinder.utils.is_blk_device', return_value=False)
+    @mock.patch('os.path.exists', return_value=True)
+    @mock.patch('os.path.ismount', return_value=True)
+    @mock.patch('cinder.image.image_utils.utils.tempdir')
+    def test_not_enough_conversion_space(self,
+                                         mock_tempdir,
+                                         mock_ismount,
+                                         mock_exists,
+                                         mock_isblk,
+                                         mock_exec,
+                                         mock_info,
+                                         mock_odirect,
+                                         mock_conf):
+        source = mock.sentinel.source
+        conv_dir = image_utils.temporary_dir()
+        mock_conf.image_conversion_dir = conv_dir
+        dest = [mock_conf.image_conversion_dir]
+        out_format = mock.sentinel.out_format
+        mock_info.side_effect = ValueError
+        mock_exec.side_effect = processutils.ProcessExecutionError(
+            stderr='No space left on device')
+
+        self.assertRaises(exception.InsufficientConversionSpace,
+                          image_utils.convert_image,
+                          source, dest, out_format)
 
 
 class TestResizeImage(test.TestCase):
@@ -503,7 +541,8 @@ class TestUploadVolume(test.TestCase):
         self.assertEqual(2, mock_info.call_count)
         mock_open.assert_called_once_with(temp_file, 'rb')
         image_service.update.assert_called_once_with(
-            ctxt, image_meta['id'], {},
+            ctxt, image_meta['id'],
+            {'size': mock_open.return_value.__enter__().tell()},
             mock_open.return_value.__enter__.return_value)
 
     @mock.patch('cinder.image.image_utils.utils.temporary_chown')
@@ -532,7 +571,7 @@ class TestUploadVolume(test.TestCase):
         mock_chown.assert_called_once_with(volume_path)
         mock_open.assert_called_once_with(volume_path, 'rb')
         image_service.update.assert_called_once_with(
-            ctxt, image_meta['id'], {},
+            ctxt, image_meta['id'], {'size': 0},
             mock_open.return_value.__enter__.return_value)
 
     @mock.patch('cinder.image.image_utils.utils.temporary_chown')
@@ -560,7 +599,7 @@ class TestUploadVolume(test.TestCase):
         self.assertFalse(mock_info.called)
         mock_open.assert_called_once_with(volume_path, 'rb')
         image_service.update.assert_called_once_with(
-            ctxt, image_meta['id'], {},
+            ctxt, image_meta['id'], {'size': 0},
             mock_open.return_value.__enter__.return_value)
 
     @mock.patch('cinder.image.image_utils.CONF')

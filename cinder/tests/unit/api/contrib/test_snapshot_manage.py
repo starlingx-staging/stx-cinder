@@ -12,6 +12,9 @@
 #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #   License for the specific language governing permissions and limitations
 #   under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 import mock
 from oslo_config import cfg
@@ -108,8 +111,9 @@ class SnapshotManageTest(test.TestCase):
 
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.manage_existing_snapshot')
     @mock.patch('cinder.volume.api.API.create_snapshot_in_db')
+    @mock.patch('cinder.db.snapshot_fault_get')
     @mock.patch('cinder.db.sqlalchemy.api.service_get')
-    def test_manage_snapshot_ok(self, mock_db,
+    def test_manage_snapshot_ok(self, mock_db, mock_fault,
                                 mock_create_snapshot, mock_rpcapi):
         """Test successful manage snapshot execution.
 
@@ -121,6 +125,7 @@ class SnapshotManageTest(test.TestCase):
         mock_db.return_value = fake_service.fake_service_obj(
             self._admin_ctxt,
             binary='cinder-volume')
+        mock_fault.return_value = None
         body = {'snapshot': {'volume_id': fake.VOLUME_ID, 'ref': 'fake_ref'}}
         res = self._get_resp_post(body)
         self.assertEqual(http_client.ACCEPTED, res.status_int, res)

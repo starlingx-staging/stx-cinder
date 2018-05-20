@@ -11,6 +11,8 @@
 #    under the License.
 
 import os
+import six
+import sys
 import traceback
 
 from oslo_concurrency import processutils
@@ -36,6 +38,12 @@ from cinder.objects import consistencygroup
 from cinder import utils
 from cinder.volume.flows import common
 from cinder.volume import utils as volume_utils
+
+try:
+    import rbd
+except ImportError:
+    rbd = None
+
 
 LOG = logging.getLogger(__name__)
 
@@ -530,10 +538,10 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
 
         image_id = image_meta['id']
         """Downloads Glance image to the specified volume."""
-        LOG.debug("Attempting download of %(image_id)s (%(image_location)s)"
-                  " to volume %(volume_id)s.",
-                  {'image_id': image_id, 'volume_id': volume.id,
-                   'image_location': image_location})
+        LOG.info("Attempting download of %(image_id)s (%(image_location)s)"
+                 " to volume %(volume_id)s.",
+                 {'image_id': image_id, 'volume_id': volume.id,
+                  'image_location': image_location})
         try:
             image_properties = image_meta.get('properties', {})
             image_encryption_key = image_properties.get(
@@ -554,13 +562,25 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                 self.driver.copy_image_to_volume(
                     context, volume, image_service, image_id)
         except processutils.ProcessExecutionError as ex:
-            LOG.exception("Failed to copy image %(image_id)s to volume: "
-                          "%(volume_id)s",
-                          {'volume_id': volume.id, 'image_id': image_id})
+            errmsg = ("Failed to copy image %(image_id)s to volume: "
+                      "%(volume_id)s, error: %(error)s")
+            msg_args = {'volume_id': volume.id,
+                        'error': ex.stderr,
+                        'image_id': image_id}
+            LOG.error(errmsg, msg_args)
+            volume_utils.update_volume_fault(context, volume.id,
+                                             (errmsg % msg_args),
+                                             sys.exc_info())
             raise exception.ImageCopyFailure(reason=ex.stderr)
         except exception.ImageUnacceptable as ex:
-            LOG.exception("Failed to copy image to volume: %(volume_id)s",
-                          {'volume_id': volume.id})
+            errmsg = ("Failed to copy image to volume: %(volume_id)s, "
+                      "error: %(error)s")
+            msg_args = {'volume_id': volume.id,
+                        'error': ex}
+            LOG.error(errmsg, msg_args)
+            volume_utils.update_volume_fault(context, volume.id,
+                                             (errmsg % msg_args),
+                                             sys.exc_info())
             raise exception.ImageUnacceptable(ex)
         except exception.ImageTooBig as ex:
             LOG.exception("Failed to copy image %(image_id)s to volume: "
@@ -568,18 +588,23 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                           {'volume_id': volume.id, 'image_id': image_id})
             excutils.save_and_reraise_exception()
         except Exception as ex:
-            LOG.exception("Failed to copy image %(image_id)s to "
-                          "volume: %(volume_id)s",
-                          {'volume_id': volume.id, 'image_id': image_id})
+            errmsg = ("Failed to copy image %(image_id)s to "
+                      "volume: %(volume_id)s, error: %(error)s")
+            msg_args = {'volume_id': volume.id, 'error': ex,
+                        'image_id': image_id}
+            LOG.error(errmsg, msg_args)
+            volume_utils.update_volume_fault(context, volume.id,
+                                             (errmsg % msg_args),
+                                             sys.exc_info())
             if not isinstance(ex, exception.ImageCopyFailure):
                 raise exception.ImageCopyFailure(reason=ex)
             else:
                 raise
 
-        LOG.debug("Downloaded image %(image_id)s (%(image_location)s)"
-                  " to volume %(volume_id)s successfully.",
-                  {'image_id': image_id, 'volume_id': volume.id,
-                   'image_location': image_location})
+        LOG.info(("Downloaded image %(image_id)s (%(image_location)s)"
+                  " to volume %(volume_id)s successfully."),
+                 {'image_id': image_id, 'volume_id': volume.id,
+                  'image_location': image_location})
 
     def _capture_volume_image_metadata(self, context, volume_id,
                                        image_id, image_meta):
@@ -816,6 +841,25 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                                                               volume,
                                                               image_id,
                                                               image_meta)
+
+        except IOError as e:
+            if "No space left" in six.text_type(e):
+                conversion_dir = CONF.image_conversion_dir
+                while not os.path.ismount(conversion_dir):
+                    conversion_dir = os.path.dirname(conversion_dir)
+                errmsg = (_("Error creating volume. "
+                            "Failed to create volume from image. "
+                            "Insufficient free space on %s for image"
+                            " download and conversion.") % conversion_dir)
+                LOG.error(errmsg)
+                volume_utils.update_volume_fault(
+                    context,
+                    volume.id,
+                    errmsg,
+                    sys.exc_info())
+                raise exception.InsufficientConversionSpace(
+                    location=conversion_dir)
+            raise
         finally:
             # If we created the volume as the minimal size, extend it back to
             # what was originally requested. If an exception has occurred or
@@ -833,10 +877,10 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
     def _create_from_image(self, context, volume,
                            image_location, image_id, image_meta,
                            image_service, **kwargs):
-        LOG.debug("Cloning %(volume_id)s from image %(image_id)s "
-                  " at location %(image_location)s.",
-                  {'volume_id': volume.id,
-                   'image_location': image_location, 'image_id': image_id})
+        LOG.info("Cloning %(volume_id)s from image %(image_id)s "
+                 " at location %(image_location)s.",
+                 {'volume_id': volume.id,
+                  'image_location': image_location, 'image_id': image_id})
 
         # NOTE(e0ne): check for free space in image_conversion_dir before
         # image downloading.
@@ -900,13 +944,27 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
 
         # Try and use the image cache, and download if not cached.
         if not cloned:
-            model_update = self._create_from_image_cache_or_download(
-                context,
-                volume,
-                image_location,
-                image_id,
-                image_meta,
-                image_service)
+            try:
+                model_update = self._create_from_image_cache_or_download(
+                    context,
+                    volume,
+                    image_location,
+                    image_id,
+                    image_meta,
+                    image_service)
+            except Exception as e:
+                # Log generic exception, update volume fault and
+                # re-raise exception
+                errmsg = ("Error creating volume. "
+                          " Message from driver: %s")
+                msg_args = six.text_type(e)
+                LOG.error(errmsg, msg_args)
+                volume_utils.update_volume_fault(
+                    context,
+                    volume.id,
+                    (errmsg % msg_args),
+                    sys.exc_info())
+                raise
 
         self._handle_bootable_volume_glance_meta(context, volume,
                                                  image_id=image_id,

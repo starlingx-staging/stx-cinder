@@ -209,7 +209,8 @@ class VolumeApiTest(test.TestCase):
                    'status': status,
                    'user_id': fake.USER_ID,
                    'volume_type': volume_type,
-                   'encrypted': False}}
+                   'encrypted': False,
+                   'error': ''}}
 
         if with_migration_status:
             volume['volume']['migration_status'] = None

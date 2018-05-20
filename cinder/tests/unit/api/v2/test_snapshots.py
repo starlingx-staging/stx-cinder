@@ -231,6 +231,7 @@ class SnapshotApiTest(test.TestCase):
                 'name': u'Updated Test Name',
                 'description': u'Default description',
                 'metadata': {},
+                'error': '',
             }
         }
         self.assertEqual(expected, res_dict)

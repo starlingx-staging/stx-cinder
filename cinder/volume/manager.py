@@ -13,6 +13,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2014-2016 Wind River Systems, Inc.
+#
 
 """
 Volume manager manages creating, attaching, detaching, and persistent storage.
@@ -35,8 +38,9 @@ intact.
 
 """
 
-
+import os.path
 import requests
+import sys
 import time
 
 from oslo_config import cfg
@@ -144,9 +148,17 @@ volume_backend_opts = [
                 help='Suppress requests library SSL certificate warnings.'),
 ]
 
+volume_manager_wrs_opts = [
+    cfg.StrOpt('in_service_marker',
+               default='/run/patching/patch-flags/cinder.restarting',
+               help='File used for detecting if we are doing '
+                    'in-service patching'),
+]
+
 CONF = cfg.CONF
 CONF.register_opts(volume_manager_opts)
 CONF.register_opts(volume_backend_opts, group=config.SHARED_CONF_GROUP)
+CONF.register_opts(volume_manager_wrs_opts)
 
 MAPPING = {
     'cinder.volume.drivers.hds.nfs.HDSNFSDriver':
@@ -534,6 +546,20 @@ class VolumeManager(manager.CleanableManager,
 
     def _do_cleanup(self, ctxt, vo_resource):
         if isinstance(vo_resource, objects.Volume):
+            if vo_resource.status in ('downloading', 'creating'):
+                # WRS: Check if error was caused by in-service patching
+                if os.path.isfile(CONF.in_service_marker):
+                    # In-service patching may cause volumes to fail
+                    # so we set a correct error message
+                    errmsg = ("Volume creation failed. In-service "
+                              "patching in progress, please retry "
+                              "after maintenance operation is complete.")
+                else:
+                    errmsg = ("Volume creation failed. Cinder-volume "
+                              "service restarted during volume creation.")
+                vol_utils.update_volume_fault(
+                    ctxt, vo_resource.id, errmsg)
+
             if vo_resource.status == 'downloading':
                 self.driver.clear_download(ctxt, vo_resource)
 
@@ -653,6 +679,13 @@ class VolumeManager(manager.CleanableManager,
             else:
                 with coordination.COORDINATOR.get_lock(locked_action):
                     _run_flow()
+        except exception.LVMThinPoolCapacityError as e:
+            if hasattr(e, 'rescheduled'):
+                rescheduled = e.rescheduled
+            errmsg = _('%s') % e
+            vol_utils.update_volume_fault(context, volume.id, errmsg,
+                                          sys.exc_info())
+            raise
         finally:
             try:
                 flow_engine.storage.fetch('refreshed')
@@ -772,7 +805,15 @@ class VolumeManager(manager.CleanableManager,
                 LOG.debug('Snapshots deleted, issuing volume delete')
                 self.driver.delete_volume(volume)
             else:
-                self.driver.delete_volume(volume)
+                try:
+                    self.driver.delete_volume(volume)
+                except exception.LVMBackingStoreIsBusy as ex:
+                    ex.msg = (_("Error deleting volume. %s")
+                              % six.text_type(ex.msg))
+                    vol_utils.update_volume_fault(context,
+                                                  volume.id,
+                                                  ex.msg)
+                    raise
         except exception.VolumeIsBusy:
             LOG.error("Unable to delete busy volume.",
                       resource=volume)
@@ -780,8 +821,15 @@ class VolumeManager(manager.CleanableManager,
             # record to avoid user confusion.
             self._clear_db(context, is_migrating_dest, volume,
                            'available')
+
+            vol_utils.update_volume_fault(
+                context,
+                volume.id,
+                _("Delete failed at %s UTC. Reason: Unable to delete busy "
+                  "volume.") % (str(timeutils.utcnow())))
+
             return
-        except Exception:
+        except Exception as e:
             with excutils.save_and_reraise_exception():
                 # If this is a destination volume, we have to clear the
                 # database record to avoid user confusion.
@@ -791,6 +839,16 @@ class VolumeManager(manager.CleanableManager,
 
                 self._clear_db(context, is_migrating_dest, volume,
                                new_status)
+
+                if hasattr(e, 'stderr'):
+                    reason = e.stderr
+                else:
+                    reason = six.text_type(e)
+                errmsg = "Delete failed at %s UTC. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                vol_utils.update_volume_fault(context,
+                                              volume.id,
+                                              errmsg)
 
         # If deleting source/destination volume in a migration, we should
         # skip quotas.
@@ -1030,10 +1088,14 @@ class VolumeManager(manager.CleanableManager,
                 snapshot.update(model_update)
                 snapshot.save()
 
-        except Exception:
+        except Exception as e:
             with excutils.save_and_reraise_exception():
                 snapshot.status = fields.SnapshotStatus.ERROR
                 snapshot.save()
+                vol_utils.update_snapshot_fault(
+                    context, snapshot.id,
+                    e.msg if hasattr(e, 'msg') else e.message,
+                    None)
 
         vol_ref = self.db.volume_get(context, snapshot.volume_id)
         if vol_ref.bootable:
@@ -1053,6 +1115,12 @@ class VolumeManager(manager.CleanableManager,
                               resource=snapshot)
                 snapshot.status = fields.SnapshotStatus.ERROR
                 snapshot.save()
+                vol_utils.update_snapshot_fault(
+                    context, snapshot.id,
+                    ("Failed updating snapshot using "
+                     "volume %(volume_id)s metadata") % {
+                        'volume_id': snapshot.volume_id},
+                    None)
                 raise exception.MetadataCopyFailure(reason=six.text_type(ex))
 
         snapshot.status = fields.SnapshotStatus.AVAILABLE
@@ -1089,17 +1157,43 @@ class VolumeManager(manager.CleanableManager,
             if unmanage_only:
                 self.driver.unmanage_snapshot(snapshot)
             else:
-                self.driver.delete_snapshot(snapshot)
+                try:
+                    self.driver.delete_snapshot(snapshot)
+                except exception.LVMBackingStoreIsBusy as ex:
+                    ex.msg = (_("Error deleting snapshot. %s")
+                              % six.text_type(ex.msg))
+                    vol_utils.update_snapshot_fault(context,
+                                                    snapshot.id,
+                                                    ex.msg)
+                    raise
+
         except exception.SnapshotIsBusy:
             LOG.error("Delete snapshot failed, due to snapshot busy.",
                       resource=snapshot)
             snapshot.status = fields.SnapshotStatus.AVAILABLE
             snapshot.save()
+
+            vol_utils.update_snapshot_fault(
+                context,
+                snapshot.id,
+                _("Delete failed at %s UTC. Reason: Unable to delete busy "
+                  "snapshot.") % (str(timeutils.utcnow())))
             return
-        except Exception:
+        except Exception as error:
             with excutils.save_and_reraise_exception():
                 snapshot.status = fields.SnapshotStatus.ERROR_DELETING
                 snapshot.save()
+
+                if hasattr(error, 'stderr'):
+                    reason = error.stderr
+                else:
+                    reason = six.text_type(error)
+                errmsg = "Delete failed at %s UTC. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                vol_utils.update_snapshot_fault(context,
+                                                snapshot.id,
+                                                errmsg)
+            return
 
         # Get reservations
         reservations = None
@@ -1209,6 +1303,7 @@ class VolumeManager(manager.CleanableManager,
                                       instance_uuid,
                                       host_name_sanitized,
                                       mountpoint)
+            LOG.info("Volume %s attached by driver", volume_id)
         except Exception as excep:
             with excutils.save_and_reraise_exception():
                 self.message_api.create(
@@ -1291,6 +1386,7 @@ class VolumeManager(manager.CleanableManager,
                       'instance': attachment.get('instance_uuid')},
                      resource=volume)
             self.driver.detach_volume(context, volume, attachment)
+            LOG.info("Volume %s detached by driver", volume_id)
         except Exception:
             with excutils.save_and_reraise_exception():
                 self.db.volume_attachment_update(
@@ -2315,9 +2411,16 @@ class VolumeManager(manager.CleanableManager,
         if not force_host_copy and new_type_id is None:
             try:
                 LOG.debug("Issue driver.migrate_volume.", resource=volume)
-                moved, model_update = self.driver.migrate_volume(ctxt,
-                                                                 volume,
-                                                                 host)
+                try:
+                    moved, model_update = self.driver.migrate_volume(ctxt,
+                                                                     volume,
+                                                                     host)
+                except exception.LVMBackingStoreIsBusy as ex:
+                    ex.msg = (_("Error migrating volume. %s")
+                              % six.text_type(ex.msg))
+                    vol_utils.update_volume_fault(context, volume.id, ex.msg)
+                    raise
+
                 if moved:
                     updates = {'host': host['host'],
                                'cluster_name': host.get('cluster_name'),
@@ -2363,8 +2466,14 @@ class VolumeManager(manager.CleanableManager,
                         {'config_group': config_group},
                         resource={'type': 'driver',
                                   'id': self.driver.__class__.__name__})
+            # Workaround to have cinder-volume recover when it is
+            # started with the ceph backend and the ceph cluster is not up yet.
+            LOG.warning('Attempting to re-initialize driver')
+            self.init_host()
         else:
             volume_stats = self.driver.get_volume_stats(refresh=True)
+            if "timestamp" not in volume_stats:
+                volume_stats["timestamp"] = timeutils.utcnow().isoformat()
             if self.extra_capabilities:
                 volume_stats.update(self.extra_capabilities)
             if volume_stats:
@@ -4328,6 +4437,108 @@ class VolumeManager(manager.CleanableManager,
 
         connection_info['attachment_id'] = attachment.id
         return connection_info
+
+    def export_volume(self, context, volume_id):
+        """Exports the specified volume to a file."""
+        payload = {'volume_id': volume_id}
+        try:
+            utils.require_driver_initialized(self.driver)
+            volume = self.db.volume_get(context, volume_id)
+            self.driver.export_volume(context, volume)
+            LOG.debug("Exported volume %(volume_id)s successfully",
+                      {'volume_id': volume_id})
+            status = "Export completed at %s" % str(timeutils.utcnow())
+            self.db.volume_update(context, volume_id,
+                                  {'backup_status': status})
+
+        except Exception as error:
+            with excutils.save_and_reraise_exception():
+                if hasattr(error, 'stderr'):
+                    reason = error.stderr
+                else:
+                    reason = six.text_type(error)
+                status = "Export failed at %s. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                self.db.volume_update(context, volume_id,
+                                      {'backup_status': status[:255]})
+                payload['message'] = six.text_type(error)
+        finally:
+            self.db.volume_update(context, volume_id,
+                                  {'status': 'available'})
+
+    def import_volume(self, context, volume_id, file_name):
+        """Imports the specified volume from a file.
+
+        file_name is an absolute path to the file to be imported
+
+        """
+        payload = {'volume_id': volume_id, 'file_name': file_name}
+        updated_status = 'available'
+        try:
+            utils.require_driver_initialized(self.driver)
+            volume = self.db.volume_get(context, volume_id)
+            updated_status = self.driver.import_volume(context, volume,
+                                                       file_name)
+            LOG.debug("Imported volume %(volume_id)s from "
+                      "file (%(file_name)s) successfully",
+                      {'volume_id': volume_id, 'file_name': file_name})
+            status = "Import completed at %s" % str(timeutils.utcnow())
+            self.db.volume_update(context, volume_id,
+                                  {'backup_status': status})
+        except Exception as error:
+            with excutils.save_and_reraise_exception():
+                payload['message'] = six.text_type(error)
+                self.db.volume_update(context, volume_id,
+                                      {'status': 'error'})
+                if hasattr(error, 'stderr'):
+                    reason = error.stderr
+                else:
+                    reason = six.text_type(error)
+                status = "Import failed at %s. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                self.db.volume_update(context, volume_id,
+                                      {'backup_status': status[:255]})
+
+        self.db.volume_update(context, volume_id,
+                              {'status': updated_status})
+
+    def export_snapshot(self, context, snapshot_id, volume_id):
+        """Exports the specified snapshot to a file."""
+        payload = {'snapshot_id': snapshot_id,
+                   'volume_id': volume_id}
+        try:
+            utils.require_driver_initialized(self.driver)
+            snapshot = self.db.snapshot_get(context, snapshot_id)
+            volume = self.db.volume_get(context, volume_id)
+            self.driver.export_volume(context, volume, snapshot)
+            LOG.debug("Exported snapshot %(snapshot_id)s volume "
+                      "%(volume_id)s successfully",
+                      {'snapshot_id': snapshot_id, 'volume_id': volume_id})
+            status = "Export completed at %s" % str(timeutils.utcnow())
+            self.db.snapshot_update(context, snapshot_id,
+                                    {'backup_status': status})
+            status = ("Snapshot export completed at %s" %
+                      str(timeutils.utcnow()))
+            self.db.volume_update(context, volume_id,
+                                  {'backup_status': status})
+        except Exception as error:
+            with excutils.save_and_reraise_exception():
+                payload['message'] = six.text_type(error)
+                if hasattr(error, 'stderr'):
+                    reason = error.stderr
+                else:
+                    reason = six.text_type(error)
+                status = "Export failed at %s. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                self.db.snapshot_update(context, snapshot_id,
+                                        {'backup_status': status[:255]})
+                status = "Snapshot export failed at %s. Reason: %s" % (
+                    str(timeutils.utcnow()), reason)
+                self.db.volume_update(context, volume_id,
+                                      {'backup_status': status[:255]})
+        finally:
+            self.db.snapshot_update(context, snapshot_id,
+                                    {'status': 'available'})
 
     def attachment_update(self,
                           context,

@@ -130,9 +130,11 @@ class AdminController(wsgi.Controller):
     def _force_delete(self, req, id, body):
         """Delete a resource, bypassing the check that it must be available."""
         context = req.environ['cinder.context']
-        self.authorize(context, 'force_delete')
         # Not found exception will be handled at the wsgi level
-        resource = self._get(context, id)
+        try:
+            resource = self._get(context, id)
+        except exception.VolumeNotFound as e:
+            raise exc.HTTPNotFound(explanation=e.msg)
         self._delete(context, resource, force=True)
         return webob.Response(status_int=http_client.ACCEPTED)
 

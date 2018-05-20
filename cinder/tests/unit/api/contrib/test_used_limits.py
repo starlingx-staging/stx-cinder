@@ -114,3 +114,61 @@ class UsedLimitsTestCase(test.TestCase):
         self.assertNotIn('totalVolumesUsed', abs_limits)
         self.assertNotIn('totalGigabytesUsed', abs_limits)
         self.assertNotIn('totalSnapshotsUsed', abs_limits)
+
+    @ddt.data(('2.0', False), ('3.38', True), ('3.38', False), ('3.39', True),
+              ('3.39', False))
+    @mock.patch('cinder.quota.QUOTAS.get_project_quotas')
+    @mock.patch('cinder.policy.enforce')
+    def test_used_limits_negative(self, ver_project, _mock_policy_enforce,
+                                  _mock_get_project_quotas):
+        version, has_project = ver_project
+        fake_req = FakeRequest(fakes.FakeRequestContext(fake.USER_ID,
+                                                        fake.PROJECT_ID,
+                                                        is_admin=True),
+                               api_version=version)
+        if has_project:
+            fake_req = FakeRequest(fakes.FakeRequestContext(fake.USER_ID,
+                                                            fake.PROJECT_ID,
+                                                            is_admin=True),
+                                   filter={'project_id': fake.UUID1},
+                                   api_version=version)
+        obj = {
+            "limits": {
+                "rate": [],
+                "absolute": {},
+            },
+        }
+        res = wsgi.ResponseObject(obj)
+
+        def get_project_quotas(context, project_id, quota_class=None,
+                               defaults=True, usages=True):
+            if project_id == fake.UUID1:
+                return {"gigabytes": {'limit': 5, 'in_use': -1}}
+            return {"gigabytes": {'limit': 10, 'in_use': -2}}
+
+        _mock_get_project_quotas.side_effect = get_project_quotas
+        # allow user to access used limits
+        _mock_policy_enforce.return_value = None
+
+        self.controller.index(fake_req, res)
+        abs_limits = res.obj['limits']['absolute']
+
+        # if admin, only 3.39 and req contains project_id filter, cinder
+        # returns the specified project's quota.
+        if version == '3.39' and has_project:
+            self.assertEqual(0, abs_limits['totalGigabytesUsed'])
+        else:
+            self.assertEqual(0, abs_limits['totalGigabytesUsed'])
+
+        fake_req = FakeRequest(fakes.FakeRequestContext(fake.USER_ID,
+                                                        fake.PROJECT_ID),
+                               api_version=version)
+        if has_project:
+            fake_req = FakeRequest(fakes.FakeRequestContext(fake.USER_ID,
+                                                            fake.PROJECT_ID),
+                                   filter={'project_id': fake.UUID1},
+                                   api_version=version)
+        # if non-admin, cinder always returns self quota.
+        self.controller.index(fake_req, res)
+        abs_limits = res.obj['limits']['absolute']
+        self.assertEqual(0, abs_limits['totalGigabytesUsed'])

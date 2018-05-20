@@ -133,8 +133,9 @@ def _convert_image(prefix, source, dest, out_format,
                    src_format=None, run_as_root=True):
     """Convert image to other format."""
 
+    # WRS: Append '-W' option to write out-of-order instead of sequential.
     cmd = prefix + ('qemu-img', 'convert',
-                    '-O', out_format, source, dest)
+                    '-W', '-O', out_format, source, dest)
 
     # Check whether O_DIRECT is supported and set '-t none' if it is
     # This is needed to ensure that all data hit the device before
@@ -150,7 +151,7 @@ def _convert_image(prefix, source, dest, out_format,
                                                    dest,
                                                    'oflag=direct')):
         cmd = prefix + ('qemu-img', 'convert',
-                        '-t', 'none')
+                        '-t', 'none', '-W')
 
         # AMI images can be raw or qcow2 but qemu-img doesn't accept "ami" as
         # an image format, so we use automatic detection.
@@ -162,7 +163,21 @@ def _convert_image(prefix, source, dest, out_format,
         cmd += ('-O', out_format, source, dest)
 
     start_time = timeutils.utcnow()
-    utils.execute(*cmd, run_as_root=run_as_root)
+
+    # If there is not enough space on the conversion partition, include
+    # the partitions's name in the error message.
+    try:
+        utils.execute(*cmd, run_as_root=run_as_root)
+    except processutils.ProcessExecutionError as ex:
+        if "No space left" in ex.stderr and CONF.image_conversion_dir in dest:
+            conversion_dir = CONF.image_conversion_dir
+            while not os.path.ismount(conversion_dir):
+                conversion_dir = os.path.dirname(conversion_dir)
+
+            raise exception.InsufficientConversionSpace(
+                location=conversion_dir)
+        raise
+
     duration = timeutils.delta_seconds(start_time, timeutils.utcnow())
 
     # NOTE(jdg): use a default of 1, mostly for unit test, but in
@@ -189,8 +204,9 @@ def _convert_image(prefix, source, dest, out_format,
                     "duration": duration,
                     "dest": dest})
 
-    msg = "Converted %(sz).2f MB image at %(mbps).2f MB/s"
-    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
+    msg = ("Converted %(sz).2f MB image at %(mbps).2f MB/s, "
+           "duration %(dur).1f sec")
+    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps, 'dur': duration})
 
 
 def convert_image(source, dest, out_format, src_format=None,
@@ -245,8 +261,9 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
     LOG.debug(msg, {"dest": image_file.name,
                     "sz": fsz_mb,
                     "duration": duration})
-    msg = "Image download %(sz).2f MB at %(mbps).2f MB/s"
-    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
+    msg = ("Image download %(sz).2f MB at %(mbps).2f MB/s, "
+           "duration %(dur).1f sec")
+    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps, "dur": duration})
 
 
 def get_qemu_data(image_id, has_meta, disk_format_raw, dest, run_as_root):
@@ -443,11 +460,17 @@ def upload_volume(context, image_service, image_meta, volume_path,
                   image_id, volume_format, image_meta['disk_format'])
         if os.name == 'nt' or os.access(volume_path, os.R_OK):
             with open(volume_path, 'rb') as image_file:
-                image_service.update(context, image_id, {}, image_file)
+                image_service.update(
+                    context, image_id,
+                    {"size": image_meta.get("size", 0)},
+                    image_file)
         else:
             with utils.temporary_chown(volume_path):
                 with open(volume_path, 'rb') as image_file:
-                    image_service.update(context, image_id, {}, image_file)
+                    image_service.update(
+                        context, image_id,
+                        {"size": image_meta.get("size", 0)},
+                        image_file)
         return
 
     with temporary_file() as tmp:
@@ -485,8 +508,16 @@ def upload_volume(context, image_service, image_meta, volume_path,
                 reason=_("Converted to %(f1)s, but format is now %(f2)s") %
                 {'f1': out_format, 'f2': data.file_format})
 
+        # qemu_img_info round the size of the of the image created.
+        # For the upload process we need the exact size of the file size
+        # so we get it from the opened file
         with open(tmp, 'rb') as image_file:
-            image_service.update(context, image_id, {}, image_file)
+            old_file_position = image_file.tell()
+            image_file.seek(0, os.SEEK_END)
+            file_size = image_file.tell()
+            image_file.seek(old_file_position, os.SEEK_SET)
+            image_service.update(context, image_id,
+                                 {"size": file_size}, image_file)
 
 
 def check_virtual_size(virtual_size, volume_size, image_id):
@@ -602,6 +633,26 @@ def temporary_dir():
         os.makedirs(CONF.image_conversion_dir)
 
     return utils.tempdir(dir=CONF.image_conversion_dir)
+
+
+def cleanup_temporary_dir():
+    """Cleanup lingering temporary image conversion files.
+
+    tmp* files are not deleted in a few scenarios. E.g., glance downloads in
+    progress, then something happens to restart cinder-volume, such as:
+    controller swact, dead office recovery, killing cinder-volume process.
+    Only call this routine during initialization.
+    """
+    if (CONF.image_conversion_dir and
+            os.path.exists(CONF.image_conversion_dir)):
+        try:
+            for f in os.listdir(CONF.image_conversion_dir):
+                if f.startswith('tmp'):
+                    path = os.path.join(CONF.image_conversion_dir, f)
+                    LOG.info("cleanup: deleting: %s", path)
+                    os.remove(path)
+        except OSError:
+            pass
 
 
 def coalesce_chain(vhd_chain):

@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2017 Wind River Systems, Inc.
+#
 """Cinder Driver for EMC VNX based on CLI."""
 
 from oslo_log import log as logging

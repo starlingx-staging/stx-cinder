@@ -21,6 +21,7 @@ import mock
 
 from castellan.common import exception as castellan_exc
 from castellan.tests.unit.key_manager import mock_key_manager
+from oslo_concurrency import processutils
 from oslo_utils import imageutils
 
 from cinder import context
@@ -36,6 +37,7 @@ from cinder.tests.unit import utils
 from cinder.tests.unit.volume.flows import fake_volume_api
 from cinder.volume.flows.api import create_volume
 from cinder.volume.flows.manager import create_volume as create_volume_manager
+from cinder.volume import utils as volume_utils
 
 
 @ddt.ddt
@@ -953,6 +955,62 @@ class CreateVolumeFlowManagerTestCase(test.TestCase):
             fake_driver.copy_image_to_volume.assert_called_once_with(
                 self.ctxt, volume, fake_image_service, image_id)
 
+    @mock.patch.object(volume_utils, 'update_volume_fault')
+    def test__copy_image_to_volume_logs(self, mock_volume_fault):
+        fake_db = mock.MagicMock()
+        fake_driver = mock.MagicMock()
+        fake_volume_manager = mock.MagicMock()
+        fake_manager = create_volume_manager.CreateVolumeFromSpecTask(
+            fake_volume_manager, fake_db, fake_driver)
+        key = None
+        volume = fake_volume.fake_volume_obj(
+            self.ctxt,
+            encryption_key_id=key)
+
+        fake_image_service = fake_image.FakeImageService()
+        image_id = fakes.IMAGE_ID
+        image_meta = {'id': image_id}
+        image_location = 'abc'
+
+        fake_driver.copy_image_to_volume.side_effect = \
+            processutils.ProcessExecutionError()
+        self.assertRaises(
+            exception.ImageCopyFailure,
+            fake_manager._copy_image_to_volume,
+            self.ctxt, volume, image_meta,
+            image_location, fake_image_service)
+        fake_driver.copy_image_to_volume.assert_called_once_with(
+            self.ctxt, volume, fake_image_service, image_id)
+        mock_volume_fault.assert_called_once()
+
+        mock_volume_fault.reset_mock()
+        fake_driver.reset_mock()
+
+        fake_driver.copy_image_to_volume.side_effect = \
+            exception.ImageUnacceptable(image_id=image_id, reason='')
+        self.assertRaises(
+            exception.ImageUnacceptable,
+            fake_manager._copy_image_to_volume,
+            self.ctxt, volume, image_meta,
+            image_location, fake_image_service)
+        fake_driver.copy_image_to_volume.assert_called_once_with(
+            self.ctxt, volume, fake_image_service, image_id)
+        mock_volume_fault.assert_called_once()
+
+        mock_volume_fault.reset_mock()
+        fake_driver.reset_mock()
+
+        fake_driver.copy_image_to_volume.side_effect = \
+            exception.ImageCopyFailure(reason='')
+        self.assertRaises(
+            exception.ImageCopyFailure,
+            fake_manager._copy_image_to_volume,
+            self.ctxt, volume, image_meta,
+            image_location, fake_image_service)
+        fake_driver.copy_image_to_volume.assert_called_once_with(
+            self.ctxt, volume, fake_image_service, image_id)
+        mock_volume_fault.assert_called_once()
+
 
 class CreateVolumeFlowManagerGlanceCinderBackendCase(test.TestCase):
 
@@ -1745,3 +1803,53 @@ class CreateVolumeFlowManagerImageCacheTestCase(test.TestCase):
         # Make sure we didn't try and create a cache entry
         self.assertFalse(self.mock_cache.ensure_space.called)
         self.assertFalse(self.mock_cache.create_cache_entry.called)
+
+    @mock.patch('cinder.image.image_utils.check_available_space')
+    @mock.patch('cinder.image.image_utils.qemu_img_info')
+    @mock.patch('cinder.message.api.API.create')
+    @mock.patch('cinder.db.volume_fault_update')
+    @mock.patch('os.path.ismount', return_value=True)
+    def test_create_from_image_ioerror(
+            self, mock_ismount, mock_volume_fault_update,
+            mock_message_create, mock_qemu_info, mock_check_space,
+            mock_get_internal_context,
+            mock_create_from_img_dl, mock_create_from_src,
+            mock_handle_bootable, mock_fetch_img):
+        image_info = imageutils.QemuImgInfo()
+        image_info.virtual_size = '2147483648'
+        mock_qemu_info.return_value = image_info
+        self.mock_driver.clone_image.return_value = (None, False)
+        self.mock_cache.get_entry.return_value = None
+
+        volume = fake_volume.fake_volume_obj(self.ctxt, size=2,
+                                             host='foo@bar#pool')
+        image_volume = fake_volume.fake_db_volume(size=2)
+        self.mock_db.volume_create.return_value = image_volume
+
+        image_location = 'someImageLocationStr'
+        image_id = fakes.IMAGE_ID
+        image_meta = mock.MagicMock()
+        mock_create_from_img_dl.side_effect = IOError(
+            "No space left on device")
+
+        manager = create_volume_manager.CreateVolumeFromSpecTask(
+            self.mock_volume_manager,
+            self.mock_db,
+            self.mock_driver,
+            image_volume_cache=self.mock_cache
+        )
+        self.assertRaises(
+            exception.InsufficientConversionSpace,
+            manager._create_from_image_cache_or_download,
+            self.ctxt,
+            volume,
+            image_location,
+            image_id,
+            image_meta,
+            self.mock_image_service
+        )
+
+        mock_volume_fault_update.assert_called_once()
+        args = mock_volume_fault_update.call_args[0]
+        self.assertEqual(args[1], volume.id)
+        self.assertIn('Insufficient free space', args[2].get('message', ''))

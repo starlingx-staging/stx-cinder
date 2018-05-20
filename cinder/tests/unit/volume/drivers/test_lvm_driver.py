@@ -198,7 +198,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
             volume_path = self.volume.driver.local_path(dst_volume)
             snapshot_path = self.volume.driver.local_path(snapshot_ref)
             volume_size = 1024
-            block_size = '1M'
+            block_size = '4M'
             mock_copy.assert_called_with(snapshot_path,
                                          volume_path,
                                          volume_size,
@@ -242,6 +242,46 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
             lvm_driver.create_volume_from_snapshot(dst_volume,
                                                    snapshot_ref)
             mock_extend.assert_called_with(dst_volume, dst_volume['size'])
+
+    @mock.patch.object(brick_lvm.LVM, 'get_volumes',
+                       return_value=[{'vg': 'fake_vg', 'name': 'fake_vol',
+                                      'size': '1000'}])
+    @mock.patch.object(brick_lvm.LVM, 'get_all_physical_volumes')
+    @mock.patch.object(brick_lvm.LVM, 'get_all_volume_groups',
+                       return_value=[{'name': 'cinder-volumes',
+                                      'size': '5.52',
+                                      'available': '0.52',
+                                      'lv_count': '2',
+                                      'uuid': 'vR1JU3-FAKE-C4A9-PQFh-Mctm'}])
+    @mock.patch('cinder.brick.local_dev.lvm.LVM.get_lvm_version',
+                return_value=(2, 2, 100))
+    def test_snapshot_over_subscription(self, _mock_get_version, mock_vgs,
+                                        mock_pvs, mock_get_volumes):
+
+        self.configuration.lvm_type = 'thin'
+        self.configuration.max_over_subscription_ratio = 1
+        lvm_driver = lvm.LVMVolumeDriver(configuration=self.configuration,
+                                         db=db)
+        # Test case for thin LVM
+        lvm_driver._sparse_copy_volume = True
+        lvm_driver.vg = brick_lvm.LVM('cinder-volumes', 'sudo')
+        volume_size = 5
+
+        with mock.patch.object(self.volume.driver, '_create_volume'), \
+                mock.patch.object(lvm_driver.vg, 'get_volume',
+                                  return_value={'name': 'fake_lv',
+                                                'size': volume_size}), \
+                mock.patch.object(lvm_driver.vg, 'create_lv_snapshot'):
+            lvm_driver.vg.vg_size = 10
+            lvm_driver.vg.vg_provisioned_capacity = 8
+            fake_volume = tests_utils.create_volume(
+                self.context, size=volume_size)
+            fake_snapshot = tests_utils.create_snapshot(
+                self.context, fake_volume['id'])
+
+            self.assertRaises(exception.LVMThinPoolCapacityError,
+                              lvm_driver.create_snapshot,
+                              fake_snapshot)
 
     @mock.patch.object(cinder.volume.utils, 'get_all_volume_groups',
                        return_value=[{'name': 'cinder-volumes'}])
@@ -492,7 +532,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
                 '/dev/mapper/cinder--volumes-testvol',
                 '/dev/mapper/cinder--volumes--2-testvol',
                 2048,
-                '1M',
+                '4M',
                 execute=mock_execute,
                 sparse=False)
 
@@ -541,7 +581,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
                 '/dev/mapper/cinder--volumes-testvol',
                 '/dev/mapper/cinder--volumes--2-testvol',
                 2048,
-                '1M',
+                '4M',
                 execute=mock_execute,
                 sparse=True)
 
@@ -868,6 +908,31 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
 
         self.assertEqual(expected_value,
                          lvm_driver.configuration.max_over_subscription_ratio)
+
+    def test_do_setup_clean_temporary_dir(self):
+        vg_obj = fake_lvm.FakeBrickLVM('cinder-volumes',
+                                       False,
+                                       None,
+                                       'default')
+        self.configuration.volume_clear = 'zero'
+        self.configuration.volume_clear_size = 0
+        self.configuration.lvm_type = 'thin'
+        self.configuration.iscsi_helper = 'tgtadm'
+        lvm_driver = lvm.LVMVolumeDriver(configuration=self.configuration,
+                                         vg_obj=vg_obj, db=db)
+        tmp_files = ['tmpFileA', 'tmpFileB']
+        with mock.patch('os.path.exists', return_value=True) \
+                as mock_path_exists, \
+                mock.patch('os.listdir', return_value=tmp_files), \
+                mock.patch('os.remove') as mock_remove:
+            lvm_driver.do_setup('context')
+            mock_path_exists.assert_called_once_with(
+                CONF.image_conversion_dir)
+            self.assertEqual(mock_remove.call_count, len(tmp_files))
+            calls = [args for args, kwargs in mock_remove.call_args_list]
+            for f in tmp_files:
+                self.assertIn((os.path.join(CONF.image_conversion_dir, f),),
+                              calls)
 
 
 class LVMISCSITestCase(test_driver.BaseDriverTestCase):

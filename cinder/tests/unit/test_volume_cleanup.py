@@ -43,8 +43,10 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
         workers = db.worker_get_all(self.context, read_deleted='yes')
         self.assertListEqual([], workers)
 
-    def test_init_host_clears_uploads_available_volume(self):
+    @mock.patch('os.listdir')
+    def test_init_host_clears_uploads_available_volume(self, mock_listdir):
         """init_host will clean an available volume stuck in uploading."""
+        mock_listdir.return_value = []
         volume = tests_utils.create_volume(self.context, status='uploading',
                                            size=0, host=CONF.host)
 
@@ -77,9 +79,12 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
         self.assertEqual("in-use", volume.status)
         self._assert_workers_are_removed()
 
+    @mock.patch('os.listdir')
     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
-    def test_init_host_clears_downloads(self, mock_cleanup_tmp_file):
+    def test_init_host_clears_downloads(self, mock_cleanup_tmp_file,
+                                        mock_listdir):
         """Test that init_host will unwedge a volume stuck in downloading."""
+        mock_listdir.return_value = []
         volume = tests_utils.create_volume(self.context, status='downloading',
                                            size=0, host=CONF.host)
         db.worker_create(self.context, resource_type='Volume',
@@ -97,9 +102,12 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
         self.volume.delete_volume(self.context, volume=volume)
         self._assert_workers_are_removed()
 
+    @mock.patch('os.listdir')
     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
-    def test_init_host_resumes_deletes(self, mock_cleanup_tmp_file):
+    def test_init_host_resumes_deletes(self, mock_cleanup_tmp_file,
+                                       mock_listdir):
         """init_host will resume deleting volume in deleting status."""
+        mock_listdir.return_value = []
         volume = tests_utils.create_volume(self.context, status='deleting',
                                            size=0, host=CONF.host)
 
@@ -114,15 +122,17 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
         mock_cleanup_tmp_file.assert_called_once_with(CONF.host)
         self._assert_workers_are_removed()
 
+    @mock.patch('os.listdir')
     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
     def test_create_volume_fails_with_creating_and_downloading_status(
-            self, mock_cleanup_tmp_file):
+            self, mock_cleanup_tmp_file, mock_listdir):
         """Test init_host_with_service in case of volume.
 
         While the status of volume is 'creating' or 'downloading',
         volume process down.
         After process restarting this 'creating' status is changed to 'error'.
         """
+        mock_listdir.return_value = []
         for status in ('creating', 'downloading'):
             volume = tests_utils.create_volume(self.context, status=status,
                                                size=0, host=CONF.host)
@@ -139,7 +149,8 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
             self.assertTrue(mock_cleanup_tmp_file.called)
             self._assert_workers_are_removed()
 
-    def test_create_snapshot_fails_with_creating_status(self):
+    @mock.patch('os.listdir')
+    def test_create_snapshot_fails_with_creating_status(self, mock_listdir):
         """Test init_host_with_service in case of snapshot.
 
         While the status of snapshot is 'creating', volume process
@@ -168,8 +179,10 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
         self.volume.delete_snapshot(self.context, snapshot_obj)
         self.volume.delete_volume(self.context, volume)
 
-    def test_init_host_clears_deleting_snapshots(self):
+    @mock.patch('os.listdir')
+    def test_init_host_clears_deleting_snapshots(self, mock_listdir):
         """Test that init_host will delete a snapshot stuck in deleting."""
+        mock_listdir.return_value = []
         volume = tests_utils.create_volume(self.context, status='deleting',
                                            size=1, host=CONF.host)
         snapshot = tests_utils.create_snapshot(self.context,

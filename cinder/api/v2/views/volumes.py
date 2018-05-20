@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 import six
 
@@ -19,6 +22,7 @@ from cinder.api import common
 from cinder import group as group_api
 from cinder.objects import fields
 from cinder.volume import group_types
+from cinder.volume import utils as volume_utils
 
 
 class ViewBuilder(common.ViewBuilder):
@@ -89,6 +93,7 @@ class ViewBuilder(common.ViewBuilder):
                 'replication_status': volume.get('replication_status'),
                 'consistencygroup_id': volume.get('consistencygroup_id'),
                 'multiattach': volume.get('multiattach'),
+                'error': self._get_volume_fault(request, volume)
             }
         }
         if request.environ['cinder.context'].is_admin:
@@ -107,6 +112,20 @@ class ViewBuilder(common.ViewBuilder):
                 volume_ref['volume']['consistencygroup_id'] = group_id
 
         return volume_ref
+
+    def _get_volume_fault(self, request, volume):
+        msg = ""
+        # Decoupling fault conditions from only being displayed when the volume
+        # is only in the error state. We have scenarios where a fault occurs
+        # (like volume in use) where we won't land in an error state. We might
+        # be in an error_deleting or available state. So if we've had a fault
+        # populated for the volume, populate it for displaying to the user.
+        fault = volume_utils.get_volume_fault(
+            request.environ['cinder.context'],
+            volume.get('id'))
+        if fault:
+            msg = fault.get('message')
+        return msg
 
     def _is_volume_encrypted(self, volume):
         """Determine if volume is encrypted."""

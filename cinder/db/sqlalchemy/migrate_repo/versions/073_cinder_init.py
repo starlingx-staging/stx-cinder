@@ -17,6 +17,7 @@ import datetime
 from oslo_config import cfg
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index
 from sqlalchemy import Integer, MetaData, String, Table, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 
 # Get default values via config.  The defaults will either
 # come from the default values set in the quota option
@@ -30,6 +31,10 @@ CONF.import_opt('quota_consistencygroups', 'cinder.quota')
 
 CLASS_NAME = 'default'
 CREATED_AT = datetime.datetime.now()  # noqa
+
+
+def MediumText():
+    return Text().with_variant(MEDIUMTEXT(), 'mysql')
 
 
 def define_tables(meta):
@@ -135,6 +140,7 @@ def define_tables(meta):
         Column('provider_id', String(255)),
         Column('multiattach', Boolean),
         Column('previous_status', String(255)),
+        Column('backup_status', String(255)),
         mysql_engine='InnoDB',
         mysql_charset='utf8'
     )
@@ -155,6 +161,21 @@ def define_tables(meta):
         Column('detach_time', DateTime),
         Column('attach_mode', String(36)),
         Column('attach_status', String(255)),
+        mysql_engine='InnoDB',
+        mysql_charset='utf8'
+    )
+
+    volume_fault = Table(
+        'volume_fault', meta,
+        Column('created_at', DateTime),
+        Column('updated_at', DateTime),
+        Column('deleted_at', DateTime),
+        Column('deleted', Boolean),
+        Column('id', Integer, primary_key=True, nullable=False),
+        Column('volume_id', String(length=36), ForeignKey('volumes.id'),
+               nullable=False),
+        Column('message', String(length=255)),
+        Column('details', MediumText()),
         mysql_engine='InnoDB',
         mysql_charset='utf8'
     )
@@ -184,6 +205,7 @@ def define_tables(meta):
                ForeignKey('cgsnapshots.id')),
         Column('provider_id', String(255)),
         Column('provider_auth', String(255)),
+        Column('backup_status', String(255)),
         mysql_engine='InnoDB',
         mysql_charset='utf8'
     )
@@ -494,6 +516,7 @@ def define_tables(meta):
             cgsnapshots,
             volumes,
             volume_attachment,
+            volume_fault,
             snapshots,
             snapshot_metadata,
             quality_of_service_specs,
@@ -536,6 +559,7 @@ def upgrade(migrate_engine):
                   "volume_type_projects",
                   "volumes",
                   "volume_attachment",
+                  "volume_fault",
                   "migrate_version",
                   "quotas",
                   "services",

@@ -13,19 +13,31 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2014, 2017 Wind River Systems, Inc.
+#
 """Drivers for volumes."""
 
 import abc
 import time
 
+import os
 from os_brick import exception as brick_exception
+import pipes
+import shutil
+import tempfile
+
+import eventlet
+
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_config import types
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import timeutils
 import six
 
+from cinder.db import base
 from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
@@ -36,6 +48,7 @@ from cinder.volume import configuration
 from cinder.volume import driver_utils
 from cinder.volume import rpcapi as volume_rpcapi
 from cinder.volume import throttling
+from oslo_serialization import jsonutils
 
 LOG = logging.getLogger(__name__)
 
@@ -115,7 +128,9 @@ volume_opts = [
                      'optionally, auto can be set and Cinder '
                      'will autodetect type of backing device')),
     cfg.StrOpt('volume_dd_blocksize',
-               default='1M',
+               # WRS increase blocksize when using O_DIRECT to improved
+               # write throughput
+               default='4M',
                help='The default block size used when copying/clearing '
                     'volumes'),
     cfg.StrOpt('volume_copy_blkio_cgroup_name',
@@ -273,6 +288,9 @@ volume_opts = [
                help='Availability zone for this volume backend. If not set, '
                     'the storage_availability_zone option value is used as '
                     'the default for all backends.'),
+    cfg.StrOpt('backup_dir',
+               default='/opt/backups',
+               help='Volume backup directory')
 ]
 
 # for backward compatibility
@@ -302,6 +320,249 @@ CONF.register_opts(iser_opts, group=configuration.SHARED_CONF_GROUP)
 CONF.register_opts(volume_opts)
 CONF.register_opts(iser_opts)
 CONF.import_opt('backup_use_same_host', 'cinder.backup.api')
+
+
+class VolumeMetadataAPI(base.Base):
+    """API for getting/setting volume metadata
+
+    Copied from class BackupMetadataAPI (cinder.backup.driver.py) in
+    Icehouse release.
+    """
+
+    TYPE_TAG_VOL_BASE_META = 'volume-base-metadata'
+    TYPE_TAG_VOL_META = 'volume-metadata'
+    TYPE_TAG_VOL_GLANCE_META = 'volume-glance-metadata'
+    TYPE_TAG_VOL_ATTACHMENT_META = 'volume-attachment-metadata'
+
+    def __init__(self, context, db_driver=None):
+        super(VolumeMetadataAPI, self).__init__(db_driver)
+        self.context = context
+
+    @staticmethod
+    def _is_serializable(value):
+        """Returns True if value is serializable."""
+        try:
+            jsonutils.dumps(value)
+        except TypeError:
+            LOG.info("Value with type=%s is not serializable", type(value))
+            return False
+
+        return True
+
+    def _save_vol_base_meta(self, container, volume_id):
+        """Save base volume metadata to container.
+
+        This will fetch all fields from the db Volume object for volume_id and
+        save them in the provided container dictionary.
+        """
+        type_tag = self.TYPE_TAG_VOL_BASE_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        meta = self.db.volume_get(self.context, volume_id)
+        if meta:
+            container[type_tag] = {}
+            for key, value in meta:
+                # Exclude fields that are "not JSON serializable"
+                if not self._is_serializable(value):
+                    LOG.info("Unable to serialize field '%s' - excluding "
+                             "from backup", key)
+                    continue
+                container[type_tag][key] = value
+
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        else:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    def _save_vol_meta(self, container, volume_id):
+        """Save volume metadata to container.
+
+        This will fetch all fields from the db VolumeMetadata object for
+        volume_id and save them in the provided container dictionary.
+        """
+        type_tag = self.TYPE_TAG_VOL_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        meta = self.db.volume_metadata_get(self.context, volume_id)
+        if meta:
+            container[type_tag] = {}
+            for entry in meta:
+                # Exclude fields that are "not JSON serializable"
+                if not self._is_serializable(meta[entry]):
+                    LOG.info("Unable to serialize field '%s' - excluding "
+                             "from backup", entry)
+                    continue
+                container[type_tag][entry] = meta[entry]
+
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        else:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    def _save_vol_glance_meta(self, container, volume_id):
+        """Save volume Glance metadata to container.
+
+        This will fetch all fields from the db VolumeGlanceMetadata object for
+        volume_id and save them in the provided container dictionary.
+        """
+        type_tag = self.TYPE_TAG_VOL_GLANCE_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+        try:
+            meta = self.db.volume_glance_metadata_get(self.context, volume_id)
+            if meta:
+                container[type_tag] = {}
+                for entry in meta:
+                    # Exclude fields that are "not JSON serializable"
+                    if not self._is_serializable(entry.value):
+                        LOG.info("Unable to serialize field '%s' - "
+                                 "excluding from backup", entry)
+                        continue
+                    container[type_tag][entry.key] = entry.value
+
+            LOG.debug("Completed fetching metadata type '%s'", type_tag)
+        except exception.GlanceMetadataNotFound:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    def _save_vol_attach_meta(self, container, volume_id):
+        """Save volume metadata to container.
+
+        This will fetch all fields from the db VolumeAttachment object for
+        volume_id and save them in the provided container dictionary.
+        """
+        type_tag = self.TYPE_TAG_VOL_ATTACHMENT_META
+        LOG.debug("Getting metadata type '%s'", type_tag)
+
+        meta = self.db.volume_attachment_get_all_by_volume_id(
+            self.context, volume_id)
+        if meta:
+            container[type_tag] = []
+            for attachment in meta:
+                att_meta = {}
+                for entry in attachment:
+                    # Exclude fields that are not JSON serializable
+                    if not self._is_serializable(entry[1]):
+                        LOG.info("Unable to serialize field %(e)s"
+                                 " of attachment %(a)s - "
+                                 "excluding from backup",
+                                 {"e": entry[0],
+                                  "a": attachment['id']})
+                        continue
+                    att_meta[entry[0]] = entry[1]
+                container[type_tag].append(att_meta)
+
+            LOG.debug("Completed fetching "
+                      "metadata type '%s'", type_tag)
+        else:
+            LOG.debug("No metadata type '%s' available", type_tag)
+
+    @staticmethod
+    def _filter(metadata, fields):
+        """Returns set of metadata restricted to required fields.
+
+        If fields is empty list, the full set is returned.
+        """
+        if fields == []:
+            return metadata
+
+        subset = {}
+        for field in fields:
+            if field in metadata:
+                subset[field] = metadata[field]
+            else:
+                LOG.debug("Excluding field '%s'", field)
+
+        return subset
+
+    def _restore_vol_base_meta(self, metadata, volume_id, fields):
+        """Restore values to Volume object for provided fields."""
+        LOG.debug("Restoring volume base metadata")
+        # Only set the display_name if it was not None since the
+        # restore action will have set a name which is more useful than
+        # None.
+        key = 'display_name'
+        if key in fields and key in metadata and metadata[key] is None:
+            fields = [f for f in fields if f != key]
+
+        metadata = self._filter(metadata, fields)
+        self.db.volume_update(self.context, volume_id, metadata)
+
+    def _restore_vol_meta(self, metadata, volume_id, fields):
+        """Restore values to VolumeMetadata object for provided fields."""
+        LOG.debug("Restoring volume metadata")
+        metadata = self._filter(metadata, fields)
+        self.db.volume_metadata_update(self.context, volume_id, metadata, True)
+
+    def _restore_vol_glance_meta(self, metadata, volume_id, fields):
+        """Restore values to VolumeGlanceMetadata object for provided fields.
+
+        First delete any existing metadata then save new values.
+        """
+        LOG.debug("Restoring volume glance metadata")
+        metadata = self._filter(metadata, fields)
+        self.db.volume_glance_metadata_delete_by_volume(self.context,
+                                                        volume_id)
+        for key, value in metadata.items():
+            self.db.volume_glance_metadata_create(self.context,
+                                                  volume_id,
+                                                  key, value)
+
+        # Now mark the volume as bootable
+        self.db.volume_update(self.context, volume_id,
+                              {'bootable': True})
+
+    def _v1_restore_factory(self):
+        """All metadata is backed up but we selectively restore.
+
+        Returns a dictionary of the form:
+
+            {<type tag>: (<fields list>, <restore function>)}
+
+        Empty field list indicates that all backed up fields should be
+        restored.
+        """
+        return {self.TYPE_TAG_VOL_BASE_META:
+                (self._restore_vol_base_meta,
+                 ['display_name', 'display_description']),
+                self.TYPE_TAG_VOL_META:
+                (self._restore_vol_meta, []),
+                self.TYPE_TAG_VOL_GLANCE_META:
+                (self._restore_vol_glance_meta, [])}
+
+    def get(self, volume_id):
+        """Get volume metadata.
+
+        Returns a json-encoded dict containing all metadata and the restore
+        version i.e. the version used to decide what actually gets restored
+        from this container when doing a backup restore.
+        """
+        container = {'version': 1}
+        self._save_vol_base_meta(container, volume_id)
+        self._save_vol_meta(container, volume_id)
+        self._save_vol_glance_meta(container, volume_id)
+        self._save_vol_attach_meta(container, volume_id)
+
+        if container:
+            return jsonutils.dumps(container)
+        else:
+            return None
+
+    def put(self, volume_id, json_metadata):
+        """Restore volume metadata to a volume.
+
+        The json container should contain a version that is supported here.
+        """
+        meta_container = jsonutils.loads(json_metadata)
+        version = meta_container['version']
+        if version == 1:
+            factory = self._v1_restore_factory()
+        else:
+            msg = (_("Unsupported backup metadata version (%s)") % (version))
+            raise exception.CinderException(msg)
+
+        for type in factory:
+            func = factory[type][0]
+            fields = factory[type][1]
+            if type in meta_container:
+                func(meta_container[type], volume_id, fields)
+            else:
+                msg = "No metadata of type '%s' to restore" % (type)
+                LOG.debug(msg)
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -1838,6 +2099,244 @@ class BaseVD(object):
     def extend_volume(self, volume, new_size):
         msg = _("Extend volume not implemented")
         raise NotImplementedError(msg)
+
+    def copy_volume_to_file(self, context, volume, dest_file):
+        """Copies a volume to a file."""
+
+        raise NotImplementedError("Driver is not initialized")
+
+    def copy_file_to_volume(self, context, src_file, volume):
+        """Copies a file to a volume."""
+
+        raise NotImplementedError("Driver is not initialized")
+
+    def copy_snapshot_to_file(self, snapshot, dest_file):
+        """Copies a snapshot to a file."""
+        raise NotImplementedError("Driver is not initialized")
+
+    def export_volume(self, context, volume, snapshot=None):
+        """Export the volume or snapshot to a file."""
+
+        dest_dir = self.configuration.backup_dir
+
+        if snapshot:
+            LOG.debug('export_snapshot %s volume %s to directory %s.',
+                      snapshot['name'], volume['name'], dest_dir)
+        else:
+            LOG.debug('export_volume %s to directory %s.',
+                      volume['name'], dest_dir)
+
+        # Check whether directory exists
+        if not os.path.isdir(dest_dir):
+            msg = (_('Destination directory %s does not exist.') % dest_dir)
+            raise exception.CinderException(msg)
+
+        # Ensure working directory exists
+        work_dir = self.configuration.backup_dir + "/temp"
+        if not os.path.isdir(work_dir):
+            os.mkdir(work_dir)
+        temp_dir = tempfile.mkdtemp(dir=work_dir)
+
+        # Export volume metadata to a file
+        volume_meta_api = VolumeMetadataAPI(context)
+        json_meta = volume_meta_api.get(volume['id'])
+        if json_meta:
+            meta_file = volume['name'] + '.meta'
+            meta_path = os.path.join(temp_dir, meta_file)
+            try:
+                with open(meta_path, 'w') as f:
+                    f.write(json_meta)
+            except IOError:
+                shutil.rmtree(temp_dir)
+                LOG.error("Failed to open file %s.", meta_path)
+                raise
+        else:
+            shutil.rmtree(temp_dir)
+            msg = (_('No volume metadata for volume %s.') % volume['name'])
+            raise exception.CinderException(msg)
+
+        # Copy volume or snapshot contents to a file
+        volume_path = None
+        volume_file = None
+        try:
+            volume_file = volume['name'] + '.vol'
+            volume_path = os.path.join(temp_dir, volume_file)
+            if snapshot:
+                self.copy_snapshot_to_file(snapshot, volume_path)
+            else:
+                self.copy_volume_to_file(context, volume, volume_path)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                msg = _("Failed to copy volume %(src)s to %(dest)s")
+                LOG.error(msg, {'src': volume['id'], 'dest': volume_path})
+                shutil.rmtree(temp_dir)
+
+        # Create a compressed tar file
+        tar_path = None
+        try:
+            now = timeutils.utcnow()
+            tar_file = (volume['name'] + '-' + now.strftime("%Y%m%d-%H%M%S") +
+                        '.tgz')
+            tar_path = os.path.join(dest_dir, tar_file)
+            # Using the python tar library block the process causing it
+            # to miss state reporting timings and may cause failure to
+            # export multiple volumes as the same time
+            args = ['tar', '-cvzf', tar_path, '-C', temp_dir,
+                    volume_file, meta_file]
+            self._try_execute(*args)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error("Failed to create tar file %(dest)s",
+                          {'dest': tar_path})
+                shutil.rmtree(temp_dir)
+
+        # Remove the temporary files
+        shutil.rmtree(temp_dir)
+
+    def import_volume(self, context, volume, file_name):
+        """Import the volume from the specified file.
+
+        Returns the status that should be used for the imported volume.
+        """
+
+        LOG.debug('import_volume %s from file %s.', volume['name'], file_name)
+
+        if os.path.isabs(file_name):
+            msg = (_('Absolute path not allowed %s.') % file_name)
+            raise exception.CinderException(msg)
+
+        # Check whether file exists
+        file_name = os.path.join(self.configuration.backup_dir, file_name)
+        if not os.path.isfile(file_name):
+            msg = (_('File %s does not exist.') % file_name)
+            raise exception.CinderException(msg)
+
+        # Ensure working directory exists
+        work_dir = self.configuration.backup_dir + "/temp"
+        if not os.path.isdir(work_dir):
+            os.mkdir(work_dir)
+        temp_dir = tempfile.mkdtemp(dir=work_dir)
+
+        # Check the contents of the tar file
+        # Find the meta and volume files
+        files, meta_file, volume_file = eventlet.tpool.execute(
+            utils.get_archive_meta_volume, file_name)
+
+        if not meta_file:
+            shutil.rmtree(temp_dir)
+            msg = (_('No volume metadata found in %s.') % file_name)
+            raise exception.CinderException(msg)
+        if not volume_file:
+            shutil.rmtree(temp_dir)
+            msg = (_('No volume data found in %s.') % file_name)
+            raise exception.CinderException(msg)
+
+        # Extract the contents of the tar file; pipe through 'dd' to
+        # to enable O_DIRECT and larger blocksize.
+        dd_opts = "oflag=direct"
+        for fn in files:
+            args = ["/usr/bin/bash", "-c",
+                    ("tar -xzf '{0}' '{1}' -O "
+                     "| "
+                     "dd of='{2}/{3}' {4} obs='{5}'").format(
+                        pipes.quote(file_name), pipes.quote(fn),
+                        pipes.quote(temp_dir), pipes.quote(fn), dd_opts,
+                        self.configuration.volume_dd_blocksize)]
+            try:
+                self._try_execute(*args, run_as_root=True)
+            except processutils.ProcessExecutionError as e:
+                msg = (_("tar/dd failed - (ret=%(ret)s stderr=%(stderr)s)")
+                       % {'ret': e.exit_code, 'stderr': e.stderr})
+                LOG.info(msg)
+                raise exception.CinderException(msg)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    msg = _("Failed to extract tar file (src)s to %(dest)s")
+                    LOG.error(msg, {'src': file_name, 'dest': temp_dir})
+                    shutil.rmtree(temp_dir)
+
+        # Examine volume metadata
+        meta_path = temp_dir + '/' + meta_file
+        try:
+            with open(meta_path, 'r') as f:
+                json_meta = f.read()
+        except IOError:
+            shutil.rmtree(temp_dir)
+            LOG.error("Failed to open file %s.", meta_path)
+            raise
+
+        # Check the version of the metadata
+        meta_container = jsonutils.loads(json_meta)
+        version = meta_container['version']
+        if version != 1:
+            shutil.rmtree(temp_dir)
+            msg = (_("Unsupported backup metadata version (%s)") % version)
+            raise exception.CinderException(msg)
+
+        # Ensure volume being imported matches id of destination volume
+        import_vol_id = meta_container['volume-base-metadata']['id']
+        if import_vol_id != volume['id']:
+            shutil.rmtree(temp_dir)
+            msg = (_('Volume ID being imported (%(import)s) does not match '
+                     'destination volume ID (%(dest)s)') %
+                   {'import': import_vol_id, 'dest': volume['id']})
+            raise exception.CinderException(msg)
+
+        # Ensure attachments validity
+        if not self._check_validity_of_attachments(volume, meta_container):
+            shutil.rmtree(temp_dir)
+            prev = [x['instance_uuid'] for x in
+                    meta_container['volume-attachment-metadata']]
+            curr = [x['instance_uuid'] for x in
+                    volume['volume_attachment']]
+            msg = (_("Volume being imported, (%(id)s), "
+                     "was attached to different "
+                     "instance(s) than destination volume (%(dest)s) "
+                     " prev attach:%(prev)s current attach:%(current)s") %
+                   {'id': import_vol_id, 'dest': volume['id'],
+                    'prev': prev, 'current': curr})
+            raise exception.CinderException(msg)
+
+        # Import volume contents from file
+        volume_path = None
+        try:
+            volume_path = temp_dir + '/' + volume_file
+            self.copy_file_to_volume(context, volume_path, volume)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                msg = _("Failed to copy %(src)s to volume %(dest)s")
+                LOG.error(msg, {'src': volume_path, 'dest': volume['id']})
+                shutil.rmtree(temp_dir)
+
+        # Remove the temporary files
+        shutil.rmtree(temp_dir)
+
+        if volume['volume_attachment']:
+            return 'in-use'
+        else:
+            return 'available'
+
+    def _check_validity_of_attachments(self, volume, meta):
+        """Check the validity of volume attachments
+
+        Ensure any instance attached to volume being imported matches
+        instance attached to destination volume (if any)
+        """
+        type_tag = 'volume-attachment-metadata'
+
+        # Attachments are considered valid by default if the volume is
+        # detached or the imported metadata does not contain any attachments
+        if not volume['volume_attachment'] or type_tag not in meta:
+            return True
+
+        # Each attachment in the imported metadata should match exactly
+        # one attachment in the volume attachment list
+        for prev_attachment in meta[type_tag]:
+            matches = [x for x in volume['volume_attachment'] if
+                       x['instance_uuid'] == prev_attachment['instance_uuid']]
+            if len(matches) != 1:
+                return False
+        return True
 
     def accept_transfer(self, context, volume, new_user, new_project):
         pass

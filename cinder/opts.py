@@ -278,6 +278,7 @@ def list_opts():
                 cinder_volume_driver.volume_opts,
                 cinder_volume_driver.iser_opts,
                 cinder_volume_manager.volume_manager_opts,
+                cinder_volume_manager.volume_manager_wrs_opts,
                 cinder_wsgi_eventletserver.socket_opts,
             )),
         ('FC-ZONE-MANAGER',
@@ -289,6 +290,10 @@ def list_opts():
         ('KEY_MANAGER',
             itertools.chain(
                 cinder_keymgr_confkeymgr.key_mgr_opts,
+            )),
+        ('NOVA_CLIENT',
+            itertools.chain(
+                cinder_compute_nova.nova_client_opts,
             )),
         ('backend_defaults',
             itertools.chain(

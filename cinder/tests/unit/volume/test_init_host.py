@@ -35,8 +35,11 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
         super(VolumeInitHostTestCase, self).setUp()
         self.service_id = 1
 
+    @mock.patch('os.listdir')
     @mock.patch('cinder.manager.CleanableManager.init_host')
-    def test_init_host_count_allocated_capacity(self, init_host_mock):
+    def test_init_host_count_allocated_capacity(self, init_host_mock,
+                                                mock_listdir):
+        mock_listdir.return_value = []
         vol0 = tests_utils.create_volume(
             self.context, size=100, host=CONF.host)
         vol1 = tests_utils.create_volume(
@@ -120,8 +123,10 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
         self.assertEqual(
             1024, stats['pools']['pool2']['allocated_capacity_gb'])
 
+    @mock.patch('os.listdir')
     @mock.patch.object(driver.BaseVD, "update_provider_info")
-    def test_init_host_sync_provider_info(self, mock_update):
+    def test_init_host_sync_provider_info(self, mock_update, mock_listdir):
+        mock_listdir.return_value = []
         vol0 = tests_utils.create_volume(
             self.context, size=1, host=CONF.host)
         vol1 = tests_utils.create_volume(

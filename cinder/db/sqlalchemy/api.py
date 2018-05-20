@@ -60,6 +60,7 @@ from cinder import exception
 from cinder.i18n import _
 from cinder.objects import fields
 from cinder import utils
+from cinder.volume import group_types
 from cinder.volume import utils as vol_utils
 
 
@@ -1596,6 +1597,11 @@ def volume_destroy(context, volume_id):
             update({'deleted': True,
                     'deleted_at': now,
                     'updated_at': literal_column('updated_at')})
+        model_query(context, models.VolumeFault, session=session).\
+            filter_by(volume_id=volume_id).\
+            update({'deleted': True,
+                    'deleted_at': now,
+                    'updated_at': literal_column('updated_at')})
     del updated_values['updated_at']
     return updated_values
 
@@ -1786,6 +1792,7 @@ def _volume_get_query(context, session=None, project_only=False,
             options(joinedload('volume_metadata')).\
             options(joinedload('volume_admin_metadata')).\
             options(joinedload('volume_type')).\
+            options(joinedload('volume_fault')).\
             options(joinedload('volume_attachment')).\
             options(joinedload('consistencygroup')).\
             options(joinedload('group'))
@@ -1794,6 +1801,7 @@ def _volume_get_query(context, session=None, project_only=False,
                            project_only=project_only).\
             options(joinedload('volume_metadata')).\
             options(joinedload('volume_type')).\
+            options(joinedload('volume_fault')).\
             options(joinedload('volume_attachment')).\
             options(joinedload('consistencygroup')).\
             options(joinedload('group'))
@@ -2852,6 +2860,52 @@ def volume_admin_metadata_update(context, volume_id, metadata, delete,
 
 
 ###################
+# WRS-extend
+#
+
+def _volume_fault_get_query(context, volume_id, session=None):
+    return model_query(context, models.VolumeFault, session=session, read_deleted="no").\
+        filter_by(volume_id=volume_id)
+
+
+@require_context
+@require_volume_exists
+def volume_fault_get(context, volume_id):
+    return _volume_fault_get_query(context, volume_id).first()
+
+
+@require_context
+@require_volume_exists
+def volume_fault_delete(context, volume_id):
+    _volume_fault_get_query(context, volume_id).\
+        update({'deleted': True,
+                'deleted_at': timeutils.utcnow(),
+                'updated_at': literal_column('updated_at')})
+
+
+@require_context
+@require_volume_exists
+def volume_fault_update(context, volume_id, values):
+    session = get_session()
+
+    with session.begin(subtransactions=True):
+        # delete existing fault
+        fault = _volume_fault_get_query(context, volume_id,
+                                        session=session).first()
+        if fault is not None:
+            fault.update({'deleted': True})
+            fault.save(session=session)
+
+        # add new fault
+        fault = models.VolumeFault()
+        values.update({'volume_id': volume_id})
+        fault.update(values)
+        fault.save(session=session)
+
+    return _volume_fault_get_query(context, volume_id).first()
+
+
+###################
 
 
 @require_context
@@ -2889,6 +2943,12 @@ def snapshot_destroy(context, snapshot_id):
             update({'deleted': True,
                     'deleted_at': utcnow,
                     'updated_at': literal_column('updated_at')})
+        model_query(context, models.SnapshotFault, session=session).\
+            filter_by(snapshot_id=snapshot_id).\
+            update({'deleted': True,
+                    'deleted_at': utcnow,
+                    'updated_at': literal_column('updated_at')})
+
     del updated_values['updated_at']
     return updated_values
 
@@ -2899,6 +2959,7 @@ def _snapshot_get(context, snapshot_id, session=None):
                          project_only=True).\
         options(joinedload('volume')).\
         options(joinedload('snapshot_metadata')).\
+        options(joinedload('snapshot_fault')).\
         filter_by(id=snapshot_id).\
         first()
 
@@ -2954,7 +3015,8 @@ def snapshot_get_all(context, filters=None, marker=None, limit=None,
 def _snaps_get_query(context, session=None, project_only=False):
     return model_query(context, models.Snapshot, session=session,
                        project_only=project_only).\
-        options(joinedload('snapshot_metadata'))
+        options(joinedload('snapshot_metadata')).\
+        options(joinedload('snapshot_fault'))
 
 
 @apply_like_filters(model=models.Snapshot)
@@ -3025,6 +3087,7 @@ def snapshot_get_all_for_volume(context, volume_id):
                        project_only=True).\
         filter_by(volume_id=volume_id).\
         options(joinedload('snapshot_metadata')).\
+        options(joinedload('snapshot_fault')).\
         all()
 
 
@@ -3063,8 +3126,10 @@ def snapshot_get_all_by_host(context, host, filters=None):
             host_attr = getattr(models.Volume, 'host')
             conditions = [host_attr == host,
                           host_attr.op('LIKE')(host + '#%')]
-            query = query.join(models.Snapshot.volume).filter(
-                or_(*conditions)).options(joinedload('snapshot_metadata'))
+            query = query.join(models.Snapshot.volume).\
+                filter(or_(*conditions)).\
+                options(joinedload('snapshot_metadata')).\
+                options(joinedload('snapshot_fault'))
             return query.all()
     elif not host:
         return []
@@ -3132,7 +3197,9 @@ def snapshot_get_all_by_project(context, project_id, filters=None, marker=None,
     if not query:
         return []
 
-    query = query.options(joinedload('snapshot_metadata'))
+    query = query.\
+        options(joinedload('snapshot_metadata')).\
+        options(joinedload('snapshot_fault'))
     return query.all()
 
 
@@ -3170,7 +3237,9 @@ def snapshot_get_all_active_by_window(context, begin, end=None,
     query = query.filter(or_(models.Snapshot.deleted_at == None,  # noqa
                              models.Snapshot.deleted_at > begin))
     query = query.options(joinedload(models.Snapshot.volume))
-    query = query.options(joinedload('snapshot_metadata'))
+    query = query.\
+        options(joinedload('snapshot_metadata')).\
+        options(joinedload('snapshot_fault'))
     if end:
         query = query.filter(models.Snapshot.created_at < end)
     if project_id:
@@ -3187,6 +3256,47 @@ def snapshot_update(context, snapshot_id, values):
     if not result:
         raise exception.SnapshotNotFound(snapshot_id=snapshot_id)
 
+
+def _snapshot_fault_get_query(context, snapshot_id, session=None):
+    return model_query(context, models.SnapshotFault, session=session, read_deleted="no").\
+        filter_by(snapshot_id=snapshot_id)
+
+
+@require_context
+@require_snapshot_exists
+def snapshot_fault_get(context, snapshot_id):
+    return _snapshot_fault_get_query(context, snapshot_id).first()
+
+
+@require_context
+@require_snapshot_exists
+def snapshot_fault_delete(context, snapshot_id):
+    _snapshot_fault_get_query(context, snapshot_id).\
+        update({'deleted': True,
+                'deleted_at': timeutils.utcnow(),
+                'updated_at': literal_column('updated_at')})
+
+
+@require_context
+@require_snapshot_exists
+def snapshot_fault_update(context, snapshot_id, values):
+    session = get_session()
+
+    with session.begin(subtransactions=True):
+        # delete existing fault
+        fault = _snapshot_fault_get_query(context, snapshot_id,
+                                          session=session).first()
+        if fault is not None:
+            fault.update({'deleted': True})
+            fault.save(session=session)
+
+        # add new fault
+        fault = models.SnapshotFault()
+        values.update({'snapshot_id': snapshot_id})
+        fault.update(values)
+        fault.save(session=session)
+
+    return _snapshot_fault_get_query(context, snapshot_id).first()
 
 ####################
 
@@ -5941,6 +6051,169 @@ def group_creating_from_src(group_id=None, group_snapshot_id=None):
     return sql.exists([subq]).where(match_id)
 
 
+@require_admin_context
+def migrate_consistencygroups_to_groups(context, max_count, force=False):
+    now = timeutils.utcnow()
+    grps = model_query(context, models.Group)
+    ids = [grp.id for grp in grps] if grps else []
+    # NOTE(xyang): We are using the same IDs in the CG and Group tables.
+    # This is because we are deleting the entry from the CG table after
+    # migrating it to the Group table. Also when the user queries a CG id,
+    # we will display it whether it is in the CG table or the Group table.
+    # Without using the same IDs, we'll have to add a consistencygroup_id
+    # column in the Group group to correlate it with the CG entry so we
+    # know whether it has been migrated or not. It makes things more
+    # complicated especially because the CG entry will be removed after
+    # migration.
+    query = (model_query(context, models.ConsistencyGroup).
+             filter(models.ConsistencyGroup.id.notin_(ids)))
+    cgs = query.limit(max_count)
+
+    # Check if default group_type for migrating cgsnapshots exists
+    result = (model_query(context, models.GroupTypes,
+                          project_only=True).
+              filter_by(name=group_types.DEFAULT_CGSNAPSHOT_TYPE).
+              first())
+    if not result:
+        msg = (_('Group type %s not found. Rerun migration script to create '
+                 'the default cgsnapshot type.') %
+               group_types.DEFAULT_CGSNAPSHOT_TYPE)
+        raise exception.NotFound(msg)
+    grp_type_id = result['id']
+
+    count_all = 0
+    count_hit = 0
+    for cg in cgs.all():
+        cg_ids = []
+        cgsnapshot_ids = []
+        volume_ids = []
+        snapshot_ids = []
+        session = get_session()
+        with session.begin():
+            count_all += 1
+            cgsnapshot_list = []
+            vol_list = []
+
+            # NOTE(dulek): We should avoid modifying consistency groups that
+            # are in the middle of some operation.
+            if not force:
+                if cg.status not in (fields.ConsistencyGroupStatus.AVAILABLE,
+                                     fields.ConsistencyGroupStatus.ERROR,
+                                     fields.ConsistencyGroupStatus.DELETING):
+                    continue
+
+            # Migrate CG to group
+            grp = model_query(context, models.Group,
+                              session=session).filter_by(id=cg.id).first()
+            if grp:
+                # NOTE(xyang): This CG is already migrated to group.
+                continue
+
+            values = {'id': cg.id,
+                      'created_at': now,
+                      'updated_at': now,
+                      'deleted': False,
+                      'user_id': cg.user_id,
+                      'project_id': cg.project_id,
+                      'host': cg.host,
+                      'cluster_name': cg.cluster_name,
+                      'availability_zone': cg.availability_zone,
+                      'name': cg.name,
+                      'description': cg.description,
+                      'group_type_id': grp_type_id,
+                      'status': cg.status,
+                      'group_snapshot_id': cg.cgsnapshot_id,
+                      'source_group_id': cg.source_cgid,
+                      }
+
+            mappings = []
+            for item in cg.volume_type_id.rstrip(',').split(','):
+                mapping = models.GroupVolumeTypeMapping()
+                mapping['volume_type_id'] = item
+                mapping['group_id'] = cg.id
+                mappings.append(mapping)
+
+            values['volume_types'] = mappings
+
+            grp = models.Group()
+            grp.update(values)
+            session.add(grp)
+            cg_ids.append(cg.id)
+
+            # Update group_id in volumes
+            vol_list = (model_query(context, models.Volume,
+                                    session=session).
+                        filter_by(consistencygroup_id=cg.id).all())
+            for vol in vol_list:
+                vol.group_id = cg.id
+                volume_ids.append(vol.id)
+
+            # Migrate data from cgsnapshots to group_snapshots
+            cgsnapshot_list = (model_query(context, models.Cgsnapshot,
+                                           session=session).
+                               filter_by(consistencygroup_id=cg.id).all())
+
+            for cgsnap in cgsnapshot_list:
+                grp_snap = (model_query(context, models.GroupSnapshot,
+                                        session=session).
+                            filter_by(id=cgsnap.id).first())
+                if grp_snap:
+                    # NOTE(xyang): This CGSnapshot is already migrated to
+                    # group snapshot.
+                    continue
+
+                grp_snap = models.GroupSnapshot()
+                values = {'id': cgsnap.id,
+                          'created_at': now,
+                          'updated_at': now,
+                          'deleted': False,
+                          'user_id': cgsnap.user_id,
+                          'project_id': cgsnap.project_id,
+                          'group_id': cg.id,
+                          'name': cgsnap.name,
+                          'description': cgsnap.description,
+                          'group_type_id': grp_type_id,
+                          'status': cgsnap.status, }
+                grp_snap.update(values)
+                session.add(grp_snap)
+                cgsnapshot_ids.append(cgsnap.id)
+
+                # Update group_snapshot_id in snapshots
+                snap_list = (model_query(context, models.Snapshot,
+                                         session=session).
+                             filter_by(cgsnapshot_id=cgsnap.id).all())
+                for snap in snap_list:
+                    snap.group_snapshot_id = cgsnap.id
+                    snapshot_ids.append(snap.id)
+
+            # Delete entries in CG and CGSnapshot tables
+            cg_cgsnapshot_destroy_all_by_ids(context, cg_ids, cgsnapshot_ids,
+                                             volume_ids, snapshot_ids,
+                                             session=session)
+
+            count_hit += 1
+
+    return count_all, count_hit
+
+
+@require_admin_context
+def migrate_add_message_prefix(context, max_count, force=False):
+    prefix = "VOLUME_"
+    session = get_session()
+    with session.begin():
+        messages = (model_query(context, models.Message.id, session=session).
+                    filter(~models.Message.event_id.like(prefix + '%')).
+                    limit(max_count))
+
+        count_all = messages.count()
+        count_hit = (model_query(context, models.Message, session=session).
+                     filter(models.Message.id.in_(messages.as_scalar())).
+                     update({'event_id': prefix + models.Message.event_id},
+                            synchronize_session=False))
+
+    return count_all, count_hit
+
+
 ###############################
 
 
@@ -6281,9 +6554,9 @@ def purge_deleted_rows(context, age_in_days):
                 if six.text_type(table) == "quality_of_service_specs":
                     session.query(models.QualityOfServiceSpecs).filter(
                         and_(models.QualityOfServiceSpecs.specs_id.isnot(
-                            None), models.QualityOfServiceSpecs.deleted == 1,
-                            models.QualityOfServiceSpecs.deleted_at <
-                            deleted_age)).delete()
+                            None), models.QualityOfServiceSpecs.
+                            deleted.is_(True), models.QualityOfServiceSpecs.
+                            deleted_at < deleted_age)).delete()
                 result = session.execute(
                     table.delete()
                     .where(table.c.deleted_at < deleted_age))

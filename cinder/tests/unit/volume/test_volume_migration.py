@@ -519,7 +519,7 @@ class VolumeMigrationTestCase(base.BaseVolumeTestCase):
             volume = db.volume_get(context.get_admin_context(), volume['id'])
             self.assertEqual('error', volume['migration_status'])
             self.assertEqual('available', volume['status'])
-            mock_copy.assert_called_once_with('foo', 'bar', 0, '1M',
+            mock_copy.assert_called_once_with('foo', 'bar', 0, '4M',
                                               sparse=True)
 
     def fake_attach_volume(self, ctxt, volume, instance_uuid, host_name,

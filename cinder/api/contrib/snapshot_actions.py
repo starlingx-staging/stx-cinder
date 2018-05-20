@@ -11,6 +11,9 @@
 #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #   License for the specific language governing permissions and limitations
 #   under the License.
+#
+# Copyright (c) 2014 Wind River Systems, Inc.
+#
 
 from oslo_log import log as logging
 from six.moves import http_client
@@ -21,6 +24,8 @@ from cinder.api.openstack import wsgi
 from cinder.i18n import _
 from cinder import objects
 from cinder.objects import fields
+
+from cinder import volume
 
 LOG = logging.getLogger(__name__)
 
@@ -33,6 +38,7 @@ def authorize(context, action_name):
 class SnapshotActionsController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         super(SnapshotActionsController, self).__init__(*args, **kwargs)
+        self.volume_api = volume.API()
         LOG.debug("SnapshotActionsController initialized")
 
     @wsgi.action('os-update_snapshot_status')
@@ -100,6 +106,45 @@ class SnapshotActionsController(wsgi.Controller):
         current_snapshot.update(update_dict)
         current_snapshot.save()
         return webob.Response(status_int=http_client.ACCEPTED)
+
+#    @wsgi.response(202)
+#    @wsgi.action('os-export_snapshot')
+#    def _export_snapshot(self, req, id, body):
+#        """Export a snapshot to a file.
+#        """
+#
+#        context = req.environ['cinder.context']
+#        authorize(context, 'export_snapshot')
+#
+#        LOG.debug("body: %s" % body)
+#
+#        current_snapshot = db.snapshot_get(context, id)
+#
+#        if current_snapshot['status'] not in {'available'}:
+#            msg = _("Snapshot status %(cur)s not allowed for "
+#                    "export_snapshot") % {
+#                        'cur': current_snapshot['status']}
+#            raise webob.exc.HTTPBadRequest(explanation=msg)
+#
+#        LOG.info("Exporting snapshot %(id)s", {'id': id})
+#
+#        try:
+#            snapshot = self.volume_api.get_snapshot(context, id)
+#        except exception.SnapshotNotFound as error:
+#            raise webob.exc.HTTPNotFound(explanation=error.msg)
+#
+#        try:
+#            response = self.volume_api.export_snapshot(context, snapshot)
+#        except exception.InvalidSnapshot as error:
+#            raise webob.exc.HTTPBadRequest(explanation=error.msg)
+#        except ValueError as error:
+#            raise webob.exc.HTTPBadRequest(explanation=unicode(error))
+#        except messaging.RemoteError as error:
+#            msg = "%(err_type)s: %(err_msg)s" % {'err_type': error.exc_type,
+#                                                 'err_msg': error.value}
+#            raise webob.exc.HTTPBadRequest(explanation=msg)
+#
+#        return {'os-export_snapshot': response}
 
 
 class Snapshot_actions(extensions.ExtensionDescriptor):

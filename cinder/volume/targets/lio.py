@@ -159,6 +159,9 @@ class LioAdm(iscsi.ISCSITarget):
 
         # We make changes persistent
         self._persist_configuration(vol_id)
+        LOG.info(('Finished creating iscsi_target for volume: %(id)s '
+                  'at: %(target)s'),
+                 {"id": vol_id, "target": iqn})
 
     def initialize_connection(self, volume, connector):
         volume_iqn = volume['provider_location'].split(' ')[1]
@@ -167,6 +170,9 @@ class LioAdm(iscsi.ISCSITarget):
             volume['provider_auth'].split(' ', 3)
 
         # Add initiator iqns to target ACL
+        LOG.info(('Exporting iscsi initiator: %(initiator)s '
+                  'for volume: %(id)s'),
+                 {"initiator": connector['initiator'], "id": volume["id"]})
         try:
             self._execute('cinder-rtstool', 'add-initiator',
                           volume_iqn,
@@ -183,7 +189,10 @@ class LioAdm(iscsi.ISCSITarget):
         # We make changes persistent
         self._persist_configuration(volume['id'])
 
-        return super(LioAdm, self).initialize_connection(volume, connector)
+        ret = super(LioAdm, self).initialize_connection(volume, connector)
+        LOG.info(('Exported iscsi initiator for'
+                  ' volume: %s'), volume["id"])
+        return ret
 
     def terminate_connection(self, volume, connector, **kwargs):
         if volume['provider_location'] is None:
@@ -194,6 +203,9 @@ class LioAdm(iscsi.ISCSITarget):
         volume_iqn = volume['provider_location'].split(' ')[1]
 
         # Delete initiator iqns from target ACL
+        LOG.info(('Terminating iscsi initiator: %(initiator)s '
+                  'for volume: %(id)s'),
+                 {"initiator": volume_iqn, "id": volume["id"]})
         try:
             self._execute('cinder-rtstool', 'delete-initiator',
                           volume_iqn,
@@ -207,6 +219,8 @@ class LioAdm(iscsi.ISCSITarget):
 
         # We make changes persistent
         self._persist_configuration(volume['id'])
+        LOG.info(('Terminated iscsi initiator '
+                  'for volume: %s'), volume["id"])
 
     def ensure_export(self, context, volume, volume_path):
         """Recreate exports for logical volumes."""

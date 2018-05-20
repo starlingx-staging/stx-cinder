@@ -15,7 +15,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
+#
+# Copyright (c) 2014 Wind River Systems, Inc.
+#
 """
 SQLAlchemy models for cinder data.
 """
@@ -26,6 +28,7 @@ from oslo_utils import timeutils
 from sqlalchemy import and_, func, select
 from sqlalchemy import bindparam
 from sqlalchemy import Column, Integer, String, Text, schema
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import ForeignKey, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.orm import backref, column_property, relationship, validates
@@ -33,6 +36,10 @@ from sqlalchemy.orm import backref, column_property, relationship, validates
 
 CONF = cfg.CONF
 BASE = declarative_base()
+
+
+def MediumText():
+    return Text().with_variant(MEDIUMTEXT(), 'mysql')
 
 
 class CinderBase(models.TimestampMixin,
@@ -268,6 +275,7 @@ class Volume(BASE, CinderBase):
     status = Column(String(255))  # TODO(vish): enum?
     attach_status = Column(String(255))  # TODO(vish): enum
     migration_status = Column(String(255))
+    backup_status = Column(String(255))
 
     scheduled_at = Column(DateTime)
     launched_at = Column(DateTime)
@@ -336,6 +344,20 @@ class VolumeAdminMetadata(BASE, CinderBase):
                           primaryjoin='and_('
                           'VolumeAdminMetadata.volume_id == Volume.id,'
                           'VolumeAdminMetadata.deleted == False)')
+
+
+class VolumeFault(BASE, CinderBase):
+    """Represents a fault for a volume."""
+    __tablename__ = 'volume_fault'
+    id = Column(Integer, primary_key=True)
+    message = Column(String(255))
+    details = Column(MediumText())
+    volume_id = Column(String(36), ForeignKey('volumes.id'), nullable=False)
+    volume = relationship(Volume, backref="volume_fault",
+                          foreign_keys=volume_id,
+                          primaryjoin='and_('
+                          'VolumeFault.volume_id == Volume.id,'
+                          'VolumeFault.deleted == False)')
 
 
 class VolumeAttachment(BASE, CinderBase):
@@ -671,6 +693,7 @@ class Snapshot(BASE, CinderBase):
     cgsnapshot_id = Column(String(36))
     group_snapshot_id = Column(String(36))
     status = Column(String(255))
+    backup_status = Column(String(255))
     progress = Column(String(255))
     volume_size = Column(Integer)
 
@@ -699,6 +722,22 @@ class Snapshot(BASE, CinderBase):
         backref="snapshots",
         foreign_keys=group_snapshot_id,
         primaryjoin='Snapshot.group_snapshot_id == GroupSnapshot.id')
+
+
+class SnapshotFault(BASE, CinderBase):
+    """Represents a fault for a snapshot."""
+    __tablename__ = 'snapshot_fault'
+    id = Column(Integer, primary_key=True)
+    message = Column(String(255))
+    details = Column(MediumText())
+    snapshot_id = Column(
+        String(36), ForeignKey('snapshots.id'), nullable=False)
+    snapshot = relationship(
+        Snapshot, backref="snapshot_fault",
+        foreign_keys=snapshot_id,
+        primaryjoin=('and_('
+                     'SnapshotFault.snapshot_id == Snapshot.id,'
+                     'SnapshotFault.deleted == False)'))
 
 
 class SnapshotMetadata(BASE, CinderBase):

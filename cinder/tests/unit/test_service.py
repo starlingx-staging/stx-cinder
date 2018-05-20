@@ -327,21 +327,15 @@ class ServiceTestCase(test.TestCase):
 
         serv.start()
         serv.stop()
+
+        self.assertEqual(serv.timers, [])
         serv.wait()
+
         serv.rpcserver.start.assert_called_once_with()
         serv.rpcserver.stop.assert_called_once_with()
         serv.rpcserver.wait.assert_called_once_with()
 
-        # The first loopcall will have failed on the stop call, so we will not
-        # have waited for it to stop
-        self.assertEqual(1, serv.timers[0].start.call_count)
-        self.assertEqual(1, serv.timers[0].stop.call_count)
-        self.assertFalse(serv.timers[0].wait.called)
-
-        # We will wait for the second loopcall
-        self.assertEqual(1, serv.timers[1].start.call_count)
-        self.assertEqual(1, serv.timers[1].stop.call_count)
-        self.assertEqual(1, serv.timers[1].wait.call_count)
+        self.assertEqual(serv.timers, [])
 
     @mock.patch('cinder.manager.Manager.init_host')
     @mock.patch.object(service.loopingcall, 'FixedIntervalLoopingCall')

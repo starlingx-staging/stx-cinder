@@ -83,6 +83,7 @@ class VolumeApiTest(test.TestCase):
                                    1900, 1, 1, 1, 1, 1,
                                    tzinfo=iso8601.iso8601.Utc()),
                                'size': 100,
+                               'error': '',
                                'encrypted': False}}
         self.assertEqual(expected, res_dict)
 
@@ -180,6 +181,7 @@ class VolumeApiTest(test.TestCase):
                                'created_at': datetime.datetime(
                                    1900, 1, 1, 1, 1, 1,
                                    tzinfo=iso8601.iso8601.Utc()),
+                               'error': '',
                                'size': 1}}
         body = {"volume": vol}
         req = fakes.HTTPRequest.blank('/v1/volumes')
@@ -271,6 +273,7 @@ class VolumeApiTest(test.TestCase):
             'id': fake.VOLUME_ID,
             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
                                             tzinfo=iso8601.iso8601.Utc()),
+            'error': '',
             'size': 1}}
         self.assertEqual(expected, res_dict)
         self.assertEqual(2, len(self.notifier.notifications))
@@ -306,8 +309,8 @@ class VolumeApiTest(test.TestCase):
             'id': fake.VOLUME_ID,
             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
                                             tzinfo=iso8601.iso8601.Utc()),
-            'size': 1
-        }}
+            'error': '',
+            'size': 1}}
         self.assertEqual(expected, res_dict)
         self.assertEqual(2, len(self.notifier.notifications))
 
@@ -364,6 +367,7 @@ class VolumeApiTest(test.TestCase):
             'id': fake.VOLUME_ID,
             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
                                             tzinfo=iso8601.iso8601.Utc()),
+            'error': '',
             'size': 1}}
         self.assertEqual(expected, res_dict)
         self.assertEqual(2, len(self.notifier.notifications))
@@ -421,6 +425,7 @@ class VolumeApiTest(test.TestCase):
                                  'created_at': datetime.datetime(
                                      1900, 1, 1, 1, 1, 1,
                                      tzinfo=iso8601.iso8601.Utc()),
+                                 'error': '',
                                  'size': 1}]}
         self.assertEqual(expected, res_dict)
         # Finally test that we cached the returned volumes
@@ -470,6 +475,7 @@ class VolumeApiTest(test.TestCase):
                                  'created_at': datetime.datetime(
                                      1900, 1, 1, 1, 1, 1,
                                      tzinfo=iso8601.iso8601.Utc()),
+                                 'error': '',
                                  'size': 1}]}
         self.assertEqual(expected, res_dict)
 
@@ -498,6 +504,7 @@ class VolumeApiTest(test.TestCase):
                                  'created_at': datetime.datetime(
                                      1900, 1, 1, 1, 1, 1,
                                      tzinfo=iso8601.iso8601.Utc()),
+                                 'error': '',
                                  'size': 1}]}
         self.assertEqual(expected, res_dict)
         # Finally test that we cached the returned volumes
@@ -547,6 +554,7 @@ class VolumeApiTest(test.TestCase):
                                  'created_at': datetime.datetime(
                                      1900, 1, 1, 1, 1, 1,
                                      tzinfo=iso8601.iso8601.Utc()),
+                                 'error': '',
                                  'size': 1}]}
         self.assertEqual(expected, res_dict)
 
@@ -574,6 +582,7 @@ class VolumeApiTest(test.TestCase):
                                'created_at': datetime.datetime(
                                    1900, 1, 1, 1, 1, 1,
                                    tzinfo=iso8601.iso8601.Utc()),
+                               'error': '',
                                'size': 1}}
         self.assertEqual(expected, res_dict)
         # Finally test that we cached the returned volume
@@ -615,6 +624,7 @@ class VolumeApiTest(test.TestCase):
                                'created_at': datetime.datetime(
                                    1900, 1, 1, 1, 1, 1,
                                    tzinfo=iso8601.iso8601.Utc()),
+                               'error': '',
                                'size': 1}}
 
         self.assertEqual(expected, res_dict)
@@ -701,6 +711,7 @@ class VolumeApiTest(test.TestCase):
                                'created_at': datetime.datetime(
                                    1900, 1, 1, 1, 1, 1,
                                    tzinfo=iso8601.iso8601.Utc()),
+                               'error': '',
                                'size': 1}}
         self.assertEqual(expected, res_dict)
 

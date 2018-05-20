@@ -524,6 +524,21 @@ def snapshot_metadata_update(context, snapshot_id, metadata, delete):
 ####################
 
 
+def snapshot_fault_get(context, snapshot_id):
+    """Get fault for a snapshot."""
+    return IMPL.snapshot_fault_get(context, snapshot_id)
+
+
+def snapshot_fault_delete(context, snapshot_id):
+    """Delete ."""
+    return IMPL.snapshot_fault_delete(context, snapshot_id)
+
+
+def snapshot_fault_update(context, snapshot_id, values):
+    """Update fault if it exists, otherwise create it."""
+    return IMPL.snapshot_fault_update(context, snapshot_id, values)
+
+
 def volume_metadata_get(context, volume_id):
     """Get all metadata for a volume."""
     return IMPL.volume_metadata_get(context, volume_id)
@@ -561,6 +576,25 @@ def volume_admin_metadata_update(context, volume_id, metadata, delete,
     """Update metadata if it exists, otherwise create it."""
     return IMPL.volume_admin_metadata_update(context, volume_id, metadata,
                                              delete, add, update)
+
+##################
+# WRS-extend
+#
+
+
+def volume_fault_get(context, volume_id):
+    """Get fault for a volume."""
+    return IMPL.volume_fault_get(context, volume_id)
+
+
+def volume_fault_delete(context, volume_id):
+    """Delete ."""
+    return IMPL.volume_fault_delete(context, volume_id)
+
+
+def volume_fault_update(context, volume_id, values):
+    """Update fault if it exists, otherwise create it."""
+    return IMPL.volume_fault_update(context, volume_id, values)
 
 
 ##################
@@ -1458,6 +1492,24 @@ def group_volume_type_mapping_create(context, group_id, volume_type_id):
     """Create a group volume_type mapping entry."""
     return IMPL.group_volume_type_mapping_create(context, group_id,
                                                  volume_type_id)
+
+
+def migrate_consistencygroups_to_groups(context, max_count, force=False):
+    """Migrage CGs to generic volume groups"""
+    return IMPL.migrate_consistencygroups_to_groups(context, max_count, force)
+
+
+def migrate_add_message_prefix(context, max_count, force=False):
+    """Change Message event ids to start with the VOLUME_ prefix.
+
+    :param max_count: The maximum number of messages to consider in
+                      this run.
+    :param force: Ignored in this migration
+    :returns: number of messages needing migration, number of
+              messages migrated (both will always be less than
+              max_count).
+    """
+    return IMPL.migrate_add_message_prefix(context, max_count, force)
 
 
 ###################

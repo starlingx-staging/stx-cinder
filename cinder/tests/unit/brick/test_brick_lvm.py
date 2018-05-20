@@ -156,6 +156,8 @@ class BrickLvmTestCase(test.TestCase):
                 data = "  9:12\n"
         elif 'lvcreate, -T, -L, ' in cmd_string:
             pass
+        elif 'lvcreate, -T, -l, ' in cmd_string:
+            pass
         elif 'lvcreate, -T, -V, ' in cmd_string:
             pass
         elif 'lvcreate, -n, ' in cmd_string:
@@ -309,7 +311,7 @@ class BrickLvmTestCase(test.TestCase):
 
         # The size of fake-vg volume group is 10g, so the calculated thin
         # pool size should be 9.5g (95% of 10g).
-        self.assertEqual("9.5g", self.vg.create_thin_pool())
+        self.assertEqual("+99%FREE", self.vg.create_thin_pool())
 
         # Passing a size parameter should result in a thin pool of that exact
         # size.
@@ -320,8 +322,12 @@ class BrickLvmTestCase(test.TestCase):
         self.vg.vg_thin_pool = "test-prov-cap-pool-unit"
         self.vg.vg_name = 'test-prov-cap-vg-unit'
         self.assertEqual(
-            "9.5g",
+            "+99%FREE",
             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
+        self.vg.update_volume_group_info()
+        # This only validates that update_volume_group_info()
+        # works so is safe to keep the values as before even though we now
+        # have +99%FREE instead of 95%.
         self.assertEqual("9.50", self.vg.vg_thin_pool_size)
         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)
@@ -329,8 +335,9 @@ class BrickLvmTestCase(test.TestCase):
         self.vg.vg_thin_pool = "test-prov-cap-pool-no-unit"
         self.vg.vg_name = 'test-prov-cap-vg-no-unit'
         self.assertEqual(
-            "9.5g",
+            "+99%FREE",
             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
+        self.vg.update_volume_group_info()
         self.assertEqual("9.50", self.vg.vg_thin_pool_size)
         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)

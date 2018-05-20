@@ -266,11 +266,24 @@ class RBDDriver(driver.CloneableImageVD,
             if not val:
                 raise exception.InvalidConfigurationValue(option=attr,
                                                           value=val)
-        # NOTE: Checking connection to ceph
-        # RADOSClient __init__ method invokes _connect_to_rados
-        # so no need to check for self.rados.Error here.
-        with RADOSClient(self):
-            pass
+
+        # WRS: Wait for RADOS to be ready, once driver is correctly
+        # initialized then system can easily recover from temporary failures.
+        # Otherwise, if we don't wait here, then cinder-volume will just abort
+        # after 6 retries (~ 30mins).
+        LOG.info("Checking Ceph cluster connectivity")
+        while 1:
+            try:
+                # NOTE: Checking connection to ceph
+                # RADOSClient __init__ method invokes _connect_to_rados
+                # so no need to check for self.rados.Error here.
+                with RADOSClient(self):
+                    LOG.info("Ceph cluster is up, continuing with "
+                             "driver initialization")
+                    break
+            except exception.VolumeBackendAPIException:
+                LOG.warning("Ceph is down, retrying")
+                pass
 
     def RBDProxy(self):
         return tpool.Proxy(self.rbd.RBD())
@@ -1188,6 +1201,14 @@ class RBDDriver(driver.CloneableImageVD,
                       dict(loc=image_location, err=e))
             return False
 
+    def _get_cached_location(self, image_meta):
+        """Extract the url provided by Glance RAW caching if present"""
+        properties = image_meta.get('properties')
+        if (properties and properties.get('cache_raw', '') == 'True' and
+                properties.get('cache_raw_status', '') == 'Cached'):
+            return properties.get('cache_raw_url')
+        return None
+
     def clone_image(self, context, volume,
                     image_location, image_meta,
                     image_service):
@@ -1201,6 +1222,22 @@ class RBDDriver(driver.CloneableImageVD,
                                  location in image_location[1]]
             else:
                 url_locations = [image_location[0]]
+
+            # Use RAW cache if available
+            cached_location = self._get_cached_location(image_meta)
+            if cached_location:
+                url_locations = [cached_location]
+                # The cached image is raw, update meta
+                image_meta['disk_format'] = 'raw'
+                # Remove raw caching related metadata as it can lead
+                # to confusions with images created from volumes, snapshots
+                # or instances.
+                try:
+                    for k in ['cache_raw', 'cache_raw_status',
+                              'cache_raw_url', 'cache_raw_size']:
+                        del image_meta['properties'][k]
+                except KeyError:
+                    pass
 
             # iterate all locations to look for a cloneable one.
             for url_location in url_locations:
@@ -1458,3 +1495,38 @@ class RBDDriver(driver.CloneableImageVD,
             snapshot_name = existing_ref['source-name']
             volume.rename_snap(utils.convert_str(snapshot_name),
                                utils.convert_str(snapshot.name))
+
+    def copy_volume_to_file(self, context, volume, dest_file):
+        """Copies a volume to a file."""
+
+        with fileutils.remove_path_on_error(dest_file):
+            args = ['rbd', 'export',
+                    '--pool', self.configuration.rbd_pool,
+                    volume['name'], dest_file]
+            args.extend(self._ceph_args())
+            self._try_execute(*args)
+
+    def copy_file_to_volume(self, context, src_file, volume):
+        """Copies a file to a volume."""
+
+        # Delete the volume before importing
+        self.delete_volume(volume)
+
+        # keep using the command line import instead of librbd since it
+        # detects zeroes to preserve sparseness in the image
+        args = ['rbd', 'import',
+                '--pool', self.configuration.rbd_pool,
+                src_file, volume['name'], '--new-format']
+        args.extend(self._ceph_args())
+        self._try_execute(*args)
+
+    def copy_snapshot_to_file(self, snapshot, dest_file):
+        """Copies a snapshot to a file."""
+
+        with fileutils.remove_path_on_error(dest_file):
+            args = ['rbd', 'export',
+                    '--pool', self.configuration.rbd_pool,
+                    snapshot['volume_name'],
+                    '--snap', snapshot['name'], dest_file]
+            args.extend(self._ceph_args())
+            self._try_execute(*args)

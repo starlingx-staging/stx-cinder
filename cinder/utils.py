@@ -21,6 +21,7 @@
 import abc
 import contextlib
 import datetime
+import fcntl
 import functools
 import inspect
 import logging as py_logging
@@ -32,7 +33,9 @@ import re
 import shutil
 import socket
 import stat
+import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import types
@@ -121,6 +124,58 @@ def execute(*cmd, **kwargs):
     if 'run_as_root' in kwargs and 'root_helper' not in kwargs:
         kwargs['root_helper'] = get_root_helper()
     return processutils.execute(*cmd, **kwargs)
+
+
+def piped_execute(cmd1, cmd2, **kwargs):
+    """Pipe output of cmd1 into cmd2."""
+    LOG.info("Piping cmd1='%s' into...", ' '.join(cmd1))
+    LOG.info("cmd2='%s'", ' '.join(cmd2))
+
+    if 'run_as_root' in kwargs and 'root_helper' not in kwargs:
+        kwargs['root_helper'] = get_root_helper()
+
+    try:
+        p1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+    except OSError as e:
+        LOG.error("Pipe1 failed - %s ", e)
+        raise
+
+    # NOTE(dosaboy): ensure that the pipe is blocking. This is to work
+    # around the case where evenlet.green.subprocess is used which seems to
+    # use a non-blocking pipe.
+    flags = fcntl.fcntl(p1.stdout, fcntl.F_GETFL) & (~os.O_NONBLOCK)
+    fcntl.fcntl(p1.stdout, fcntl.F_SETFL, flags)
+
+    try:
+        p2 = subprocess.Popen(cmd2, stdin=p1.stdout,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+    except OSError as e:
+        LOG.error("Pipe2 failed - %s ", e)
+        raise
+
+    p1.stdout.close()
+    stdout, stderr = p2.communicate()
+    return p2.returncode, stderr
+
+
+def get_archive_meta_volume(file_name):
+    meta_file = None
+    volume_file = None
+    files = []
+    tar = tarfile.open(file_name)
+
+    for tarinfo in tar:
+        files.append(tarinfo.name)
+        if tarinfo.name.endswith('.meta'):
+            meta_file = tarinfo.name
+        elif tarinfo.name.endswith('.vol'):
+            volume_file = tarinfo.name
+
+    tar.close()
+
+    return files, meta_file, volume_file
 
 
 def check_ssh_injection(cmd_list):

@@ -194,20 +194,36 @@ class ISCSITarget(driver.Target):
         # if DNE no big deal, we'll just create it
         chap_auth = self._get_target_chap_auth(context, volume)
         if not chap_auth:
-            chap_auth = (vutils.generate_username(),
-                         vutils.generate_password())
+            auth = volume['provider_auth']
+            if auth:
+                (auth_method, auth_username, auth_secret) = auth.split()
+                if auth_method == 'CHAP':
+                    chap_auth = (auth_username, auth_secret)
+                else:
+                    LOG.error("Failed create_export. "
+                              "Invalid auth_method: %(a)s for volume: %(v)s",
+                              {"a": auth_method, "v": volume['id']})
+                    return
+            else:
+                chap_auth = (vutils.generate_username(),
+                             vutils.generate_password())
 
         # Get portals ips and port
         portals_config = self._get_portals_config()
 
         # NOTE(jdg): For TgtAdm case iscsi_name is the ONLY param we need
         # should clean this all up at some point in the future
+        LOG.info(("Creating volume export for %(uuid)s target:%(target)s "
+                  "lun:%(lun)s path:%(volume_path)s"),
+                 {"uuid": volume['id'], "target": iscsi_target, "lun": lun,
+                  "volume_path": volume_path})
         tid = self.create_iscsi_target(iscsi_name,
                                        iscsi_target,
                                        lun,
                                        volume_path,
                                        chap_auth,
                                        **portals_config)
+        LOG.info("Volume export for %s created", volume['id'])
         data = {}
         data['location'] = self._iscsi_location(
             self.configuration.iscsi_ip_address, tid, iscsi_name, lun,
@@ -241,24 +257,45 @@ class ISCSITarget(driver.Target):
             return
 
         # NOTE: For TgtAdm case volume['id'] is the ONLY param we need
+        LOG.info(("Removing volume export for %(name)s target:%(target) "
+                  "lun:%(lun)s"),
+                 {"name": volume['id'], "target": iscsi_target, "lun": lun})
         self.remove_iscsi_target(iscsi_target, lun, volume['id'],
                                  volume['name'])
+        LOG.info("Volume export for %s removed", volume['id'])
 
     def ensure_export(self, context, volume, volume_path):
         """Recreates an export for a logical volume."""
         iscsi_name = "%s%s" % (self.configuration.iscsi_target_prefix,
                                volume['name'])
 
+        # Verify we haven't setup a CHAP creds file already
+        # if DNE no big deal, we'll just create it
         chap_auth = self._get_target_chap_auth(context, volume)
+        if not chap_auth:
+            # Use the auth info in the volume if it is there.
+            auth = volume['provider_auth']
+            if auth:
+                (auth_method, auth_username, auth_secret) = auth.split()
+                if auth_method == 'CHAP':
+                    chap_auth = (auth_username, auth_secret)
+            else:
+                LOG.info("Skipping ensure_export. No iscsi_target "
+                         "provision for volume: %s", volume['id'])
 
         # Get portals ips and port
         portals_config = self._get_portals_config()
 
         iscsi_target, lun = self._get_target_and_lun(context, volume)
+        LOG.info(("Recreating volume export for %(uuid)s target:%(target) "
+                  "lun:%(lun)s path:%(volume_path)s"),
+                 {"uuid": volume['id'], "target": iscsi_target, "lun": lun,
+                  "volume_path": volume_path})
         self.create_iscsi_target(
             iscsi_name, iscsi_target, lun, volume_path,
             chap_auth, check_exit_code=False,
             old_name=None, **portals_config)
+        LOG.info("Volume export for %s created", volume['id'])
 
     def initialize_connection(self, volume, connector):
         """Initializes the connection and returns connection info.

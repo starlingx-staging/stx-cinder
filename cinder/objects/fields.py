@@ -11,6 +11,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2017 Wind River Systems, Inc.
+#
 
 """Custom fields for Cinder objects."""
 
@@ -122,6 +125,7 @@ class SnapshotStatus(BaseCinderEnum):
     CREATING = 'creating'
     DELETING = 'deleting'
     DELETED = 'deleted'
+    EXPORTING = 'exporting'
     UPDATING = 'updating'
     ERROR_DELETING = 'error_deleting'
     UNMANAGING = 'unmanaging'
@@ -129,7 +133,8 @@ class SnapshotStatus(BaseCinderEnum):
     RESTORING = 'restoring'
 
     ALL = (ERROR, AVAILABLE, CREATING, DELETING, DELETED,
-           UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP, RESTORING)
+           EXPORTING, UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP,
+           RESTORING)
 
 
 class SnapshotStatusField(BaseEnumField):

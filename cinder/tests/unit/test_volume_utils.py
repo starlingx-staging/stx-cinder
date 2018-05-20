@@ -385,23 +385,23 @@ class LVMVolumeDriverTestCase(test.TestCase):
         self.assertEqual('10M', bs)
 
         bs = volume_utils._check_blocksize('1xBBB')
-        self.assertEqual('1M', bs)
+        self.assertEqual('4M', bs)
 
         # Test 'volume_dd_blocksize' with fraction
         bs = volume_utils._check_blocksize('1.3M')
-        self.assertEqual('1M', bs)
+        self.assertEqual('4M', bs)
 
         # Test zero-size 'volume_dd_blocksize'
         bs = volume_utils._check_blocksize('0M')
-        self.assertEqual('1M', bs)
+        self.assertEqual('4M', bs)
 
         # Test negative 'volume_dd_blocksize'
         bs = volume_utils._check_blocksize('-1M')
-        self.assertEqual('1M', bs)
+        self.assertEqual('4M', bs)
 
         # Test non-digital 'volume_dd_blocksize'
         bs = volume_utils._check_blocksize('ABM')
-        self.assertEqual('1M', bs)
+        self.assertEqual('4M', bs)
 
     @mock.patch('cinder.volume.utils._usage_from_capacity')
     @mock.patch('cinder.volume.utils.CONF')

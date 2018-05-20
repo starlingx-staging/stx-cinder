@@ -105,6 +105,23 @@ class FilterScheduler(driver.Scheduler):
         # context is not serializable
         filter_properties.pop('context', None)
 
+        # In case of multiple cinder backends, it is possible for
+        # one backend to fail to schedule, while another succeeds.
+        # If the volume is scheduled successfully, clear any fault
+        # generated.
+        utils.update_volume_fault(
+            context, volume_id, "")
+
+        LOG.info(("Volume %(volume_id)s is scheduled to create. "
+                  "\n--request_spec: %(request_spec)s, "
+                  "\n--filter_properties: %(filter_properties)s, "
+                  "\n--snapshot_id: %(snapshot_id)s, "
+                  "\n--image_id: %(image_id)s"),
+                 {'volume_id': volume_id,
+                  'request_spec': request_spec,
+                  'filter_properties': filter_properties,
+                  'snapshot_id': request_spec['snapshot_id'],
+                  'image_id': request_spec['image_id']})
         self.volume_rpcapi.create_volume(context, updated_volume, request_spec,
                                          filter_properties,
                                          allow_reschedule=True)

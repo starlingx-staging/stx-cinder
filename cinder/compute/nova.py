@@ -81,6 +81,13 @@ CONF.register_opts(nova_opts, group=NOVA_GROUP)
 CONF.register_opts(nova_session_opts, group=NOVA_GROUP)
 CONF.register_opts(nova_auth_opts, group=NOVA_GROUP)
 
+nova_client_opts = [
+    cfg.IntOpt('max_timing_buffer',
+               default=200,
+               help='The max number of the timing objects to keep'),
+]
+CONF.register_opts(nova_client_opts, group="nova_client")
+
 LOG = logging.getLogger(__name__)
 
 NOVA_API_VERSION = "2.1"
@@ -163,6 +170,12 @@ def novaclient(context, privileged_user=False, timeout=None, api_version=None):
         cacert=CONF[NOVA_GROUP].cafile,
         global_request_id=context.global_id,
         extensions=nova_extensions)
+
+    try:
+        c.set_timings_max_len(CONF.nova_client.max_timing_buffer)
+    except AttributeError as e:
+        LOG.error('fix_cinder_memory_leak was not applied to '
+                  'nova_client: %s', e)
 
     return c
 

@@ -9,6 +9,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2014, 2017 Wind River Systems, Inc.
+#
 
 """
 Driver for Linux servers running LVM.
@@ -19,11 +22,13 @@ import math
 import os
 import socket
 
+from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import importutils
+from oslo_utils import timeutils
 from oslo_utils import units
 import six
 
@@ -123,6 +128,15 @@ class LVMVolumeDriver(driver.VolumeDriver):
             self.configuration.max_over_subscription_ratio = \
                 self.configuration.lvm_max_over_subscription_ratio
 
+        self.reserved_capacity_gb = 0
+        self.lock_reserved_capacity_gb = lockutils.internal_lock(
+            'cinder-reserved-capacity')
+
+    def do_setup(self, context):
+        LOG.debug("LVMVolumeDriver do_setup called.")
+        """Cleanup the volume driver does while starting."""
+        image_utils.cleanup_temporary_dir()
+
     def _sizestr(self, size_in_g):
         return '%sg' % size_in_g
 
@@ -197,7 +211,19 @@ class LVMVolumeDriver(driver.VolumeDriver):
         if vg is not None:
             vg_ref = vg
 
-        vg_ref.create_volume(name, size, lvm_type, mirror_count)
+        try:
+            try:
+                size_gb = float(size.replace('g', ''))
+            except ValueError:
+                LOG.warning(('Failed to reserve volume space. '
+                             'Unknown size: %s'), size)
+                size_gb = 0
+            with self.lock_reserved_capacity_gb:
+                self.reserved_capacity_gb += size_gb
+            vg_ref.create_volume(name, size, lvm_type, mirror_count)
+        finally:
+            with self.lock_reserved_capacity_gb:
+                self.reserved_capacity_gb -= size_gb
 
     def _update_volume_stats(self):
         """Retrieve stats info from volume group."""
@@ -241,6 +267,9 @@ class LVMVolumeDriver(driver.VolumeDriver):
             provisioned_capacity = round(
                 float(total_capacity) - float(free_capacity), 2)
 
+        # Report reserved capacity as provisioned
+        provisioned_capacity += self.reserved_capacity_gb
+
         location_info = \
             ('LVMVolumeDriver:%(hostname)s:%(vg)s'
              ':%(lvm_type)s:%(lvm_mirrors)s' %
@@ -259,6 +288,7 @@ class LVMVolumeDriver(driver.VolumeDriver):
         # XXX FIXME if multipool support is added to LVM driver.
         single_pool = {}
         single_pool.update(dict(
+            timestamp=timeutils.utcnow().isoformat(),
             pool_name=data["volume_backend_name"],
             total_capacity_gb=total_capacity,
             free_capacity_gb=free_capacity,
@@ -458,6 +488,23 @@ class LVMVolumeDriver(driver.VolumeDriver):
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot."""
+
+        # TODO(WRS): The following check is targeted at thin pools to ensure
+        # that we don't over allocate when creating a snapshot. We need to
+        # extend this logic for thick pool allocation and add unit tests.
+        if (self.configuration.lvm_type == 'thin' and
+                self.configuration.max_over_subscription_ratio >= 1):
+            source_lvref = self.vg.get_volume(snapshot['volume_name'])
+            volume_size_gb = float(source_lvref['size'])
+            provisioned_ratio = ((self.vg.vg_provisioned_capacity +
+                                  volume_size_gb) / self.vg.vg_size)
+            if (provisioned_ratio >
+                    self.configuration.max_over_subscription_ratio):
+                ratio = self.configuration.max_over_subscription_ratio
+                raise exception.LVMThinPoolCapacityError(
+                    provisioned_ratio=provisioned_ratio,
+                    oversub_ratio=ratio,
+                    host=self.hostname)
 
         self.vg.create_lv_snapshot(self._escape_snapshot(snapshot['name']),
                                    snapshot['volume_name'],
@@ -852,3 +899,179 @@ class LVMVolumeDriver(driver.VolumeDriver):
         self.target_driver.terminate_connection(volume, connector,
                                                 **kwargs)
         return has_shared_connections
+
+# START Windriver code
+
+    def restore_configuration(self):
+        self.target_driver._restore_configuration()
+
+    def copy_volume_to_file(self, context, volume, dest_file):
+        """Copies a volume to a file."""
+
+        # Use O_DIRECT to avoid thrashing the system buffer cache
+        extra_flags = []
+        if volutils.check_for_odirect_support(
+                self.local_path(volume), dest_file, 'iflag=direct'):
+            extra_flags.append('iflag=direct')
+        if volutils.check_for_odirect_support(
+                self.local_path(volume), dest_file, 'oflag=direct'):
+            extra_flags.append('oflag=direct')
+        conv = []
+        if not extra_flags:
+            conv.append('fdatasync')
+        if conv:
+            conv_options = 'conv=' + ",".join(conv)
+            extra_flags.append(conv_options)
+
+        try:
+            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
+            blocksize = volutils._check_blocksize(
+                self.configuration.volume_dd_blocksize)
+
+            # Perform the copy
+            cmd = ['dd',
+                   'if=%s' % self.local_path(volume),
+                   'of=%s' % dest_file,
+                   'count=%d' % size_in_bytes,
+                   'bs=%s' % blocksize,
+                   'status=none']
+            cmd.extend(extra_flags)
+            self._execute(*cmd, run_as_root=True)
+        except Exception:
+            msg = (_("Failed to copy volume %(src)s to %(dest)s") %
+                   {'src': volume['id'], 'dest': dest_file})
+            LOG.error(msg)
+            raise
+
+    def copy_file_to_volume(self, context, src_file, volume):
+        """Copies a file to a volume."""
+
+        if self._volume_not_present(volume['name']):
+            # The underlying volume is gone. We need to re-create it.
+            self.create_volume(volume)
+        elif self.vg.lv_has_snapshot(volume['name']):
+            LOG.error('Unable to copy due to existing snapshot '
+                      'for volume: %s', volume['name'])
+            raise exception.VolumeIsBusy(volume_name=volume['name'])
+
+        # Use O_DIRECT to avoid thrashing the system buffer cache
+        extra_flags = []
+        if volutils.check_for_odirect_support(
+                src_file, self.local_path(volume), 'iflag=direct'):
+            extra_flags.append('iflag=direct')
+        if volutils.check_for_odirect_support(
+                src_file, self.local_path(volume), 'oflag=direct'):
+            extra_flags.append('oflag=direct')
+        conv = []
+        if not extra_flags:
+            conv.append('fdatasync')
+        if conv:
+            conv_options = 'conv=' + ",".join(conv)
+            extra_flags.append(conv_options)
+
+        try:
+            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
+            blocksize = volutils._check_blocksize(
+                self.configuration.volume_dd_blocksize)
+
+            # Perform the copy
+            cmd = ['dd',
+                   'if=%s' % src_file,
+                   'of=%s' % self.local_path(volume),
+                   'count=%d' % size_in_bytes,
+                   'bs=%s' % blocksize]
+            cmd.extend(extra_flags)
+            utils.execute(*cmd, run_as_root=True)
+        except Exception:
+            msg = (_("Failed to copy %(src)s to volume %(dest)s") %
+                   {'src': src_file, 'dest': volume['id']})
+            LOG.error(msg)
+            raise
+
+        self.restore_configuration()
+
+    def copy_snapshot_to_file(self, snapshot, dest_file):
+        """Copies a snapshot to a file."""
+
+        # Some configurations of LVM do not automatically activate
+        # ThinLVM snapshot LVs.
+        self.vg.activate_lv(snapshot['name'], is_snapshot=True)
+
+        # Use O_DIRECT to avoid thrashing the system buffer cache
+        extra_flags = []
+        if volutils.check_for_odirect_support(
+                self.local_path(snapshot), dest_file, 'iflag=direct'):
+            extra_flags.append('iflag=direct')
+        if volutils.check_for_odirect_support(
+                self.local_path(snapshot), dest_file, 'oflag=direct'):
+            extra_flags.append('oflag=direct')
+        conv = []
+        if not extra_flags:
+            conv.append('fdatasync')
+        if conv:
+            conv_options = 'conv=' + ",".join(conv)
+            extra_flags.append(conv_options)
+
+        try:
+            size_in_bytes = int(snapshot['volume_size']) * 1024 ** 3
+            blocksize = volutils._check_blocksize(
+                self.configuration.volume_dd_blocksize)
+
+            # Perform the copy
+            cmd = ['dd',
+                   'if=%s' % self.local_path(snapshot),
+                   'of=%s' % dest_file,
+                   'count=%d' % size_in_bytes,
+                   'bs=%s' % blocksize]
+            cmd.extend(extra_flags)
+            utils.execute(*cmd, run_as_root=True)
+        except Exception:
+            msg = (_("Failed to export snapshot %(src)s to %(dest)s") %
+                   {'src': snapshot['id'], 'dest': dest_file})
+            LOG.error(msg)
+            raise
+
+# END Windriver code
+
+
+class LVMISCSIDriver(LVMVolumeDriver):
+    """Empty class designation for LVMISCSI.
+
+    Since we've decoupled the inheritance of iSCSI and LVM we
+    don't really need this class any longer.  We do however want
+    to keep it (at least for now) for back compat in driver naming.
+
+    """
+    def __init__(self, *args, **kwargs):
+        super(LVMISCSIDriver, self).__init__(*args, **kwargs)
+        LOG.warning('LVMISCSIDriver is deprecated, you should '
+                    'now just use LVMVolumeDriver and specify '
+                    'target_helper for the target driver you '
+                    'wish to use.')
+
+
+class LVMISERDriver(LVMVolumeDriver):
+    """Empty class designation for LVMISER.
+
+    Since we've decoupled the inheritance of data path in LVM we
+    don't really need this class any longer.  We do however want
+    to keep it (at least for now) for back compat in driver naming.
+
+    """
+    def __init__(self, *args, **kwargs):
+        super(LVMISERDriver, self).__init__(*args, **kwargs)
+
+        LOG.warning('LVMISERDriver is deprecated, you should '
+                    'now just use LVMVolumeDriver and specify '
+                    'target_helper for the target driver you '
+                    'wish to use. In order to enable iser, please '
+                    'set iscsi_protocol with the value iser.')
+
+        LOG.debug('Attempting to initialize LVM driver with the '
+                  'following target_driver: '
+                  'cinder.volume.targets.iser.ISERTgtAdm')
+        self.target_driver = importutils.import_object(
+            'cinder.volume.targets.iser.ISERTgtAdm',
+            configuration=self.configuration,
+            db=self.db,
+            executor=self._execute)

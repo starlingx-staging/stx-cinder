@@ -22,9 +22,11 @@ import mock
 from cinder import context
 from cinder import exception
 from cinder import objects
+from cinder.scheduler import driver
 from cinder.scheduler import filter_scheduler
 from cinder.scheduler import host_manager
 from cinder.tests.unit import fake_constants as fake
+from cinder.tests.unit import fake_volume
 from cinder.tests.unit.scheduler import fakes
 from cinder.tests.unit.scheduler import test_scheduler
 from cinder.volume import utils
@@ -164,6 +166,39 @@ class FilterSchedulerTestCase(test_scheduler.SchedulerTestCase):
                           sched.schedule_create_volume, fake_context,
                           request_spec, {})
         self.assertTrue(self.was_admin)
+
+    @mock.patch('cinder.db.volume_update')
+    @mock.patch('cinder.db.volume_fault_update')
+    @mock.patch('cinder.objects.volume.Volume.get_by_id')
+    @mock.patch('cinder.db.service_get_all')
+    def test_create_volume_update_fault(
+            self,
+            _mock_service_get_all, _mock_volume_get,
+            _mock_vol_fault_update, _mock_vol_update):
+        sched = fakes.FakeFilterScheduler()
+        sched.host_manager = fakes.FakeHostManager()
+        fake_context = context.RequestContext('user', 'project',
+                                              is_admin=True)
+
+        fakes.mock_host_manager_db_calls(_mock_service_get_all)
+
+        volume = fake_volume.fake_volume_obj(self.context)
+        _mock_volume_get.return_value = volume
+
+        driver.volume_update_db(self.context, volume.id, 'fake_host',
+                                'fake_cluster')
+
+        request_spec = {'volume_type': {'name': 'LVM_iSCSI'},
+                        'volume_properties': {'project_id': 1,
+                                              'size': 1},
+                        'volume_id': volume.id,
+                        'snapshot_id': None,
+                        'image_id': None}
+        request_spec = objects.RequestSpec.from_primitives(request_spec)
+        sched.schedule_create_volume(fake_context, request_spec, {})
+        _mock_vol_fault_update.assert_called_once_with(
+            fake_context, volume.id,
+            dict(message='', details=''))
 
     @mock.patch('cinder.db.service_get_all')
     def test_schedule_happy_day(self, _mock_service_get_all):

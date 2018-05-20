@@ -11,6 +11,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 """Volume-related Utilities and helpers."""
 
@@ -23,6 +26,7 @@ import operator
 from os import urandom
 import re
 import time
+import traceback
 import uuid
 
 import eventlet
@@ -935,3 +939,62 @@ def is_group_a_type(group, key):
         )
         return spec == "<is> True"
     return False
+
+
+# WRS-extend
+def update_volume_fault(context, volume_id, message, exc_info=None):
+    """Adds the specified fault to the database."""
+
+    details = ''
+    if exc_info:
+        tb = exc_info[2]
+        if tb:
+            details = ''.join(traceback.format_tb(tb))
+
+    # Max message size in DB is 255.
+    # Truncate to 250 and add .. if message longer than 250
+    msg = (message[:250] + '..') if len(message) > 250 else message
+    values = {'message': msg, 'details': six.text_type(details)}
+    try:
+        db.volume_fault_update(context, volume_id, values)
+    except exception.VolumeNotFound:
+        pass
+
+
+# WRS-extend
+def get_volume_fault(context, volume_id):
+    """get fault from the database."""
+
+    try:
+        fault = db.volume_fault_get(context, volume_id)
+    except exception.VolumeNotFound:
+        fault = None
+    return fault
+
+
+def update_snapshot_fault(context, snapshot_id, message, exc_info=None):
+    """Adds the specified fault to the database."""
+
+    details = ''
+    if exc_info:
+        tb = exc_info[2]
+        if tb:
+            details = ''.join(traceback.format_tb(tb))
+
+    # Max message size in DB is 255.
+    # Truncate to 250 and add .. if message longer than 250
+    msg = (message[:250] + '..') if len(message) > 250 else message
+    values = {'message': msg, 'details': six.text_type(details)}
+    try:
+        db.snapshot_fault_update(context, snapshot_id, values)
+    except exception.SnapshotNotFound:
+        pass
+
+
+def get_snapshot_fault(context, snapshot_id):
+    """get fault from the database."""
+    try:
+        fault = db.snapshot_fault_get(context, snapshot_id)
+    except exception.SnapshotNotFound:
+        fault = None
+    return fault

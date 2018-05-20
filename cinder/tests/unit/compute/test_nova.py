@@ -176,6 +176,30 @@ class NovaClientTestCase(test.TestCase):
             global_request_id=self.ctx.request_id,
             timeout=None, extensions=nova.nova_extensions)
 
+    @mock.patch('novaclient.api_versions.APIVersion')
+    @mock.patch('novaclient.client.Client')
+    @mock.patch('keystoneauth1.identity.Token')
+    @mock.patch('keystoneauth1.session.Session')
+    def test_nova_client_set_timings_max_len(self, p_session,
+                                             p_token_plugin, p_client,
+                                             p_api_version):
+
+        p_client.return_value = mock.MagicMock(
+            **{'set_timings_max_len': mock.MagicMock()})
+        nova.novaclient(self.ctx)
+        p_token_plugin.assert_called_once_with(
+            auth_url='http://keystonehostfromsc:5000/v3',
+            token='token', project_name=None, project_domain_id=None
+        )
+        p_client.assert_called_once_with(
+            p_api_version(nova.NOVA_API_VERSION),
+            session=p_session.return_value, region_name=None,
+            insecure=False, endpoint_type='public', cacert='my.ca',
+            global_request_id=self.ctx.request_id,
+            timeout=None, extensions=nova.nova_extensions)
+        p_client.return_value.set_timings_max_len.assert_called_once_with(
+            CONF.nova_client.max_timing_buffer)
+
     def test_novaclient_exceptions(self):
         # This is to prevent regression if exceptions are
         # removed from novaclient since the service catalog

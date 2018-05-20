@@ -205,7 +205,9 @@ class HostCommands(object):
 class DbCommands(object):
     """Class for managing the database."""
 
-    online_migrations = ()
+    online_migrations = (
+        db.migrate_consistencygroups_to_groups,
+        db.migrate_add_message_prefix)
 
     def __init__(self):
         pass
@@ -235,8 +237,8 @@ class DbCommands(object):
     def purge(self, age_in_days):
         """Purge deleted rows older than a given age from cinder tables."""
         age_in_days = int(age_in_days)
-        if age_in_days <= 0:
-            print(_("Must supply a positive, non-zero value for age"))
+        if age_in_days < 0:
+            print(_("Must supply a positive value for age"))
             sys.exit(1)
         if age_in_days >= (int(time.time()) / 86400):
             print(_("Maximum age is count of days since epoch."))

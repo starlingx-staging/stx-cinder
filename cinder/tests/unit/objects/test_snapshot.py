@@ -60,7 +60,7 @@ class TestSnapshot(test_objects.BaseObjectsTestCase):
 
     @mock.patch('cinder.db.sqlalchemy.api.model_query')
     def test_get_by_id_no_existing_id(self, model_query):
-        query = model_query().options().options().filter_by().first
+        query = model_query().options().options().options().filter_by().first
         query.return_value = None
         self.assertRaises(exception.SnapshotNotFound,
                           objects.Snapshot.get_by_id, self.context, 123)

@@ -40,6 +40,7 @@ from cinder.objects import fields
 import cinder.policy
 from cinder import quota
 from cinder.tests import fake_driver
+from cinder.tests.unit.api import fakes
 from cinder.tests.unit import conf_fixture
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_snapshot
@@ -170,7 +171,10 @@ class VolumeTestCase(base.BaseVolumeTestCase):
                     m_get_goodness.return_value = mygoodnessfunction
                     manager._report_driver_status(1)
                     self.assertTrue(m_get_stats.called)
-                    mock_update.assert_called_once_with(expected)
+                    mock_update.assert_called_once()
+                    actual = dict(mock_update.call_args[0][0])
+                    del actual['timestamp']
+                    self.assertEqual(actual, expected)
 
     def test_is_working(self):
         # By default we have driver mocked to be initialized...
@@ -1795,19 +1799,40 @@ class VolumeTestCase(base.BaseVolumeTestCase):
         # clean up
         self.volume.delete_volume(self.context, volume)
 
-    def test_cannot_force_delete_attached_volume(self):
-        """Test volume can't be force delete in attached state."""
+    def test_cannot_force_delete_attached_volume_with_instance(self):
+        """Test volume can't be force deleted with attachment."""
         volume = tests_utils.create_volume(self.context, CONF.host,
                                            status='in-use',
                                            attach_status=
                                            fields.VolumeAttachStatus.ATTACHED)
+        fake_uuid = fakes.get_fake_uuid()
+        tests_utils.attach_volume(self.context, volume.id, fake_uuid,
+                                  'fake_host', '/dev/vda')
 
-        self.assertRaises(exception.InvalidVolume,
+        self.assertRaises(exception.VolumeAttached,
                           self.volume_api.delete,
                           self.context,
                           volume,
                           force=True)
 
+        # clean up
+        db.volume_destroy(self.context, volume.id)
+
+    def test_force_delete_attached_volume_without_instance(self):
+        """Test volume can be deleted if attachment is no longer available."""
+        volume = tests_utils.create_volume(self.context, CONF.host,
+                                           status='in-use',
+                                           attach_status = 'attached')
+
+        # delete with force
+        self.volume_api.delete(self.context, volume, force=True)
+
+        # status is deleting
+        volume = objects.Volume.get_by_id(context.get_admin_context(),
+                                          volume.id)
+        self.assertEqual('deleting', volume.status)
+
+        # clean up
         db.volume_destroy(self.context, volume.id)
 
     def test__revert_to_snapshot_generic_failed(self):

@@ -110,7 +110,7 @@ class TgtAdm(iscsi.ISCSITarget):
         iscsi_target = 0  # NOTE(jdg): Not used by tgtadm
         return iscsi_target, lun
 
-    @utils.retry(putils.ProcessExecutionError)
+    @utils.retry(putils.ProcessExecutionError, retries=6)
     def _do_tgt_update(self, name):
         (out, err) = utils.execute('tgt-admin', '--update', name,
                                    run_as_root=True)
@@ -155,7 +155,7 @@ class TgtAdm(iscsi.ISCSITarget):
             'chap_auth': chap_str, 'target_flags': target_flags,
             'write_cache': write_cache}
 
-        LOG.debug('Creating iscsi_target for Volume ID: %s', vol_id)
+        LOG.info('Creating iscsi_target for Volume ID: %s', vol_id)
         volumes_dir = self.volumes_dir
         volume_path = os.path.join(volumes_dir, vol_id)
 
@@ -287,7 +287,7 @@ class TgtAdm(iscsi.ISCSITarget):
         # if it wasn't, try again without the force.
 
         # This will NOT do any good for the case of mutliple sessions
-        # which the force was aded for but it will however address
+        # which the force was added for but it will however address
         # the cases pointed out in bug:
         #    https://bugs.launchpad.net/cinder/+bug/1304122
         if self._get_target(iqn):
@@ -313,3 +313,6 @@ class TgtAdm(iscsi.ISCSITarget):
         else:
             LOG.debug('Volume path %s not found at end, '
                       'of remove_iscsi_target.', volume_path)
+
+        LOG.info('Removed iscsi_target successfully for Volume ID: %s',
+                 vol_id)

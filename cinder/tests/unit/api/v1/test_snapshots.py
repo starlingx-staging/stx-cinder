@@ -229,6 +229,7 @@ class SnapshotApiTest(test.TestCase):
                 'created_at': None,
                 'display_name': u'Updated Test Name',
                 'display_description': u'Default description',
+                'error': '',
                 'metadata': {},
             }
         }

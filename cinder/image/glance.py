@@ -21,6 +21,7 @@ from __future__ import absolute_import
 
 import copy
 import itertools
+import os
 import random
 import shutil
 import sys
@@ -31,12 +32,21 @@ from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
+from oslo_utils import units
 import six
 from six.moves import range
 from six.moves import urllib
 
 from cinder import exception
 from cinder.i18n import _
+
+# see https://stackoverflow.com/questions/36320953
+import io
+try:
+    file_types = (file, io.IOBase)
+
+except NameError:
+    file_types = (io.IOBase,)
 
 
 glance_opts = [
@@ -51,6 +61,10 @@ glance_opts = [
                     'catalog. Format is: separated values of the form: '
                     '<service_type>:<service_name>:<endpoint_type> - '
                     'Only used if glance_api_servers are not provided.'),
+    cfg.IntOpt('glance_download_fdatasync_interval_mib',
+               default=225,
+               help='All glance downloads in progress will call fdatasync() '
+                    'once this much image data has accumulated, in MiB.'),
 ]
 glance_core_properties_opts = [
     cfg.ListOpt('glance_core_properties',
@@ -65,6 +79,10 @@ CONF.register_opts(glance_core_properties_opts)
 CONF.import_opt('glance_api_version', 'cinder.common.config')
 
 LOG = logging.getLogger(__name__)
+
+# glance download chunk counter and tracking
+_chunk_count = 0
+_do_sync = {}
 
 
 def _parse_image_ref(image_href):
@@ -338,8 +356,41 @@ class GlanceImageService(object):
         if not data:
             return image_chunks
         else:
-            for chunk in image_chunks:
-                data.write(chunk)
+            if not CONF.glance_download_fdatasync_interval_mib:
+                for chunk in image_chunks:
+                    data.write(chunk)
+                    # Give other greenthreads a chance to schedule.
+                    time.sleep(0)
+            else:
+                # Force fdatasync at regular write intervals to prevent huge
+                # backlog of pending IO in linux dirty page-cache. This helps
+                # prevent cinder-volume writes from starving out other IO.
+                # Setting the fdatasync interval too small will dramatically
+                # slow write throughput.
+                global _chunk_count
+                global _do_sync
+
+                this_fd = data.fileno()
+                _do_sync[this_fd] = False
+                chunksize = 0
+                for chunk in image_chunks:
+                    if chunksize == 0:
+                        chunksize = len(chunk)
+                        fdatasync_interval = units.Mi * \
+                            CONF.glance_download_fdatasync_interval_mib / \
+                            chunksize
+                    _chunk_count += 1
+                    data.write(chunk)
+                    if _chunk_count % fdatasync_interval == 0:
+                        for _fd in _do_sync:
+                            _do_sync[_fd] = True
+                    if _do_sync[this_fd]:
+                        data.flush()
+                        os.fdatasync(data)
+                        _do_sync[this_fd] = False
+                    # Give other greenthreads a chance to schedule.
+                    time.sleep(0)
+                del _do_sync[this_fd]
 
     def create(self, context, image_meta, data=None):
         """Store the image data and return the new image object."""
@@ -373,8 +424,17 @@ class GlanceImageService(object):
         try:
             # NOTE(dosaboy): the v2 api separates update from upload
             if CONF.glance_api_version > 1:
+                size = 0
                 if data:
-                    self._client.call(context, 'upload', image_id, data)
+                    if isinstance(data, file_types):
+                        old_fp = data.tell()
+                        data.seek(0, os.SEEK_END)
+                        size = data.tell()
+                        data.seek(old_fp, os.SEEK_SET)
+                    else:
+                        size = len(data)
+                    self._client.call(context, 'upload', image_id, data,
+                                      size)
                 if image_meta:
                     if purge_props:
                         # Properties to remove are those not specified in
@@ -384,8 +444,10 @@ class GlanceImageService(object):
                         remove_props = list(set(cur_props) -
                                             set(props_to_update))
                         image_meta['remove_props'] = remove_props
-                    image_meta = self._client.call(context, 'update', image_id,
-                                                   **image_meta)
+                    image_meta = self._client.call(
+                        context, 'update', image_id,
+                        **dict(image_meta,
+                               size=image_meta.get('size', size)))
                 else:
                     image_meta = self._client.call(context, 'get', image_id)
             else:

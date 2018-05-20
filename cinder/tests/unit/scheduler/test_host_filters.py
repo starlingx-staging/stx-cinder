@@ -101,6 +101,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
+                             'context': self.context.elevated(),
                              'request_spec': {'volume_id': fake.VOLUME_ID}}
         service = {'disabled': False}
         host = fakes.FakeBackendState('host1',
@@ -111,8 +112,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_fails_free_capacity_None(self, _mock_serv_is_up):
-        _mock_serv_is_up.return_value = True
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_fails_free_capacity_None(self, _mock_update_vol_fault,
+                                             _mock_serv_is_up):
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
                              'request_spec': {'volume_id': fake.VOLUME_ID}}
@@ -166,7 +168,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertTrue(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_extend_request_negative(self, _mock_serv_is_up):
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_extend_request_negative(self, _mock_update_vol_fault,
+                                            _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 50,
@@ -219,7 +223,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertTrue(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_fails_total_infinite(self, _mock_serv_is_up):
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_fails_total_infinite(self, _mock_update_vol_fault,
+                                         _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
@@ -232,7 +238,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_fails_total_unknown(self, _mock_serv_is_up):
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_fails_total_unknown(self, _mock_update_vol_fault,
+                                        _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
@@ -245,7 +253,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_fails_total_zero(self, _mock_serv_is_up):
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_fails_total_zero(self, _mock_update_vol_fault,
+                                     _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
@@ -330,6 +340,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 200,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> True',
                              'capabilities:thick_provisioning_support':
@@ -348,7 +359,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
                                        'service': service})
         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
 
-    def test_filter_over_subscription_equal_to_1(self, _mock_serv_is_up):
+    @mock.patch('cinder.volume.utils.update_volume_fault')
+    def test_filter_over_subscription_equal_to_1(self, _mock_update_vol_fault,
+                                                 _mock_serv_is_up):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 150,
@@ -374,6 +387,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> True',
                              'capabilities:thick_provisioning_support':
@@ -396,6 +410,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 2000,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> True',
                              'capabilities:thick_provisioning_support':
@@ -418,6 +433,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> True',
                              'capabilities:thick_provisioning_support':
@@ -440,6 +456,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> False',
                              'capabilities:thick_provisioning_support':
@@ -530,6 +547,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
         _mock_serv_is_up.return_value = True
         filt_cls = self.class_map['CapacityFilter']()
         filter_properties = {'size': 100,
+                             'context': self.context.elevated(),
                              'capabilities:thin_provisioning_support':
                                  '<is> True',
                              'capabilities:thick_provisioning_support':

@@ -65,8 +65,9 @@ class SnapshotManageTest(test.TestCase):
 
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.manage_existing_snapshot')
     @mock.patch('cinder.volume.api.API.create_snapshot_in_db')
+    @mock.patch('cinder.db.snapshot_fault_get')
     @mock.patch('cinder.objects.service.Service.get_by_id')
-    def test_manage_snapshot_route(self, mock_service_get,
+    def test_manage_snapshot_route(self, mock_service_get, mock_fault,
                                    mock_create_snapshot, mock_rpcapi):
         """Test call to manage snapshot.
 
@@ -77,6 +78,7 @@ class SnapshotManageTest(test.TestCase):
         mock_service_get.return_value = fake_service.fake_service_obj(
             self._admin_ctxt,
             binary='cinder-volume')
+        mock_fault.return_value = None
 
         body = {'snapshot': {'volume_id': fake.VOLUME_ID, 'ref': 'fake_ref'}}
         res = self._get_resp_post(body)

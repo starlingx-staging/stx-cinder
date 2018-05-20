@@ -323,7 +323,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
                                       dest_vol)
 
         self.assertEqual(attach_expected, mock_attach.mock_calls)
-        mock_copy.assert_called_with('foo', 'bar', 1024, '1M', sparse=False)
+        mock_copy.assert_called_with('foo', 'bar', 1024, '4M', sparse=False)
         self.assertEqual(detach_expected, mock_detach.mock_calls)
 
         #  Test case for sparse_copy_volume = True
@@ -336,7 +336,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
                                       dest_vol)
 
         self.assertEqual(attach_expected, mock_attach.mock_calls)
-        mock_copy.assert_called_with('foo', 'bar', 1024, '1M', sparse=True)
+        mock_copy.assert_called_with('foo', 'bar', 1024, '4M', sparse=True)
         self.assertEqual(detach_expected, mock_detach.mock_calls)
 
         # cleanup resource
@@ -423,7 +423,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
             self.context, attach_info, encryption)
         mock_fetch_to_raw.assert_called_once_with(
             self.context, image_service, fake.IMAGE_ID,
-            local_path, '1M', size=2)
+            local_path, '4M', size=2)
         mock_detach_encryptor.assert_called_once_with(
             attach_info, encryption)
         mock_detach_volume.assert_called_once_with(
@@ -521,7 +521,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
             self.context, attach_info, encryption)
         mock_fetch_to_raw.assert_called_once_with(
             self.context, image_service, fake.IMAGE_ID,
-            local_path, '1M', size=2)
+            local_path, '4M', size=2)
         mock_detach_encryptor.assert_called_once_with(
             attach_info, encryption)
         mock_detach_volume.assert_called_once_with(

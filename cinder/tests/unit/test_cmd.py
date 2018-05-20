@@ -23,6 +23,7 @@ from oslo_db import exception as oslo_exception
 from oslo_utils import timeutils
 import six
 from six.moves import StringIO
+import unittest
 
 try:
     import rtslib_fb
@@ -301,6 +302,7 @@ class TestCinderManageCmd(test.TestCase):
             version_cmds.__call__()
             version_string.assert_called_once_with()
 
+    @unittest.skip("note: purge all option is allowed")
     def test_purge_age_in_days_value_equal_to_zero(self):
         age_in_days = 0
         self._test_purge_invalid_age_in_days(age_in_days)
@@ -312,6 +314,23 @@ class TestCinderManageCmd(test.TestCase):
     def test_purge_exceeded_age_in_days_limit(self):
         age_in_days = int(time.time() / 86400) + 1
         self._test_purge_invalid_age_in_days(age_in_days)
+
+    @mock.patch('cinder.db.sqlalchemy.api.purge_deleted_rows')
+    @mock.patch('cinder.context.get_admin_context')
+    def test_purge_with_zero_age(self, get_admin_context,
+                                 purge_deleted_rows):
+        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID,
+                                      is_admin=True)
+        get_admin_context.return_value = ctxt
+
+        purge_deleted_rows.return_value = None
+
+        db_cmds = cinder_manage.DbCommands()
+        db_cmds.purge(0)
+
+        get_admin_context.assert_called_once_with()
+        purge_deleted_rows.assert_called_once_with(
+            ctxt, age_in_days=0)
 
     @mock.patch('cinder.db.sqlalchemy.api.purge_deleted_rows')
     @mock.patch('cinder.context.get_admin_context')

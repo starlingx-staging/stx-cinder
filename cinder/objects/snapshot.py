@@ -38,7 +38,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
     # Version 1.3: SnapshotStatusField now includes "unmanaging"
     # Version 1.4: SnapshotStatusField now includes "backing-up"
     # Version 1.5: SnapshotStatusField now includes "restoring"
-    VERSION = '1.5'
+    # Version 1.6: WRS: Add backup_status
+    VERSION = '1.6'
 
     # NOTE(thangp): OPTIONAL_FIELDS are fields that would be lazy-loaded. They
     # are typically the relationship in the sqlalchemy object.
@@ -71,6 +72,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
         'volume': fields.ObjectField('Volume', nullable=True),
         'cgsnapshot': fields.ObjectField('CGSnapshot', nullable=True),
         'group_snapshot': fields.ObjectField('GroupSnapshot', nullable=True),
+
+        'backup_status': fields.StringField(nullable=True),
     }
 
     @property

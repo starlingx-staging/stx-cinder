@@ -193,9 +193,11 @@ class TestIetAdmDriver(tf.TargetDriverFixture):
             self.target.ensure_export(ctxt,
                                       self.testvol,
                                       self.fake_volumes_dir)
+            expected_auth = ["stack-1-a60e2611875f40199931f2c76370d66b",
+                             "2FE0CQ8J196R"]
             self.target.create_iscsi_target.assert_called_once_with(
                 'iqn.2010-10.org.openstack:testvol',
-                1, 0, self.fake_volumes_dir, None,
+                1, 0, self.fake_volumes_dir, tuple(expected_auth),
                 portals_ips=[self.configuration.iscsi_ip_address],
                 portals_port=int(self.configuration.iscsi_port),
                 check_exit_code=False,

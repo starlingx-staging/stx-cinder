@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 """The volumes api."""
 
@@ -21,6 +24,7 @@ from webob import exc
 
 from cinder.api.openstack import wsgi
 from cinder.api.v2 import volumes as volumes_v2
+from cinder.volume import utils as volume_utils
 
 
 LOG = logging.getLogger(__name__)
@@ -43,7 +47,7 @@ def _attachment_v2_to_v1(vol):
     return d
 
 
-def _volume_v2_to_v1(volv2_results, image_id=None):
+def _volume_v2_to_v1(context, volv2_results, image_id=None):
     """Converts v2 volume details to v1 format."""
     volumes = volv2_results.get('volumes')
     if volumes is None:
@@ -78,6 +82,16 @@ def _volume_v2_to_v1(volv2_results, image_id=None):
         vol.pop('updated_at', None)
         vol.pop('user_id', None)
 
+        # WRS-extension Decoupling fault conditions from only being displayed
+        # when the volume is only in the error state. We have scenarios where a
+        # fault occurs (like volume in use) where we won't land in an error
+        # state. We might be in an error_deleting or available state. So if
+        # we've had a fault populated for the volume, populate it for
+        # displaying to the user.
+        fault = volume_utils.get_volume_fault(context, vol['id'])
+        if fault:
+            vol['error'] = fault.get('message')
+
         LOG.debug("vol=%s", vol)
 
     return volv2_results
@@ -88,19 +102,22 @@ class VolumeController(volumes_v2.VolumeController):
 
     def show(self, req, id):
         """Return data about the given volume."""
-        return _volume_v2_to_v1(super(VolumeController, self).show(
-            req, id))
+        return _volume_v2_to_v1(
+            req.environ['cinder.context'],
+            super(VolumeController, self).show(req, id))
 
     def index(self, req):
         """Returns a summary list of volumes."""
 
         # The v1 info was much more detailed than the v2 non-detailed result
         return _volume_v2_to_v1(
+            req.environ['cinder.context'],
             super(VolumeController, self).detail(req))
 
     def detail(self, req):
         """Returns a detailed list of volumes."""
         return _volume_v2_to_v1(
+            req.environ['cinder.context'],
             super(VolumeController, self).detail(req))
 
     @wsgi.response(http_client.OK)
@@ -116,6 +133,7 @@ class VolumeController(volumes_v2.VolumeController):
 
         try:
             return _volume_v2_to_v1(
+                req.environ['cinder.context'],
                 super(VolumeController, self).create(req, body),
                 image_id=image_id)
         except exc.HTTPBadRequest as e:
@@ -133,8 +151,9 @@ class VolumeController(volumes_v2.VolumeController):
             raise exc.HTTPUnprocessableEntity()
 
         try:
-            return _volume_v2_to_v1(super(VolumeController, self).update(
-                req, id, body))
+            return _volume_v2_to_v1(
+                req.environ['cinder.context'],
+                super(VolumeController, self).update(req, id, body))
         except exc.HTTPBadRequest:
             raise exc.HTTPUnprocessableEntity()
 
