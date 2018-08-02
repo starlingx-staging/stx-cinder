@@ -110,7 +110,7 @@ class TgtAdm(iscsi.ISCSITarget):
         iscsi_target = 0  # NOTE(jdg): Not used by tgtadm
         return iscsi_target, lun
 
-    @utils.retry(putils.ProcessExecutionError, retries=6)
+    @utils.retry(putils.ProcessExecutionError)
     def _do_tgt_update(self, name):
         (out, err) = utils.execute('tgt-admin', '--update', name,
                                    run_as_root=True)
