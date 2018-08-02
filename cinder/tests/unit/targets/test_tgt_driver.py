@@ -406,28 +406,3 @@ class TestTgtAdmDriver(tf.TargetDriverFixture):
                     self.fake_volumes_dir))
             # 3 - default retries count value for utils.retry
             self.assertEqual(3, get_target.call_count)
-
-    def test_create_iscsi_target_tgt_update_retry(self):
-        tgt_admin_update_count = [0]
-
-        def fail_tgt_update(*args, **kwargs):
-            try:
-                if args[0] == 'tgt-admin' and args[1] == '--update':
-                    tgt_admin_update_count[0] += 1
-                    raise putils.ProcessExecutionError(stderr='')
-            except IndexError:
-                pass
-            return ('', '')
-
-        with mock.patch('cinder.utils.execute', side_effect=fail_tgt_update),\
-                mock.patch.object(
-                    self.target, '_get_target', return_value=1), \
-                mock.patch.object(
-                    self.target, '_verify_backing_lun',
-                    side_effect=lambda x, y: True):
-            self.assertRaises(
-                exception.ISCSITargetCreateFailed,
-                self.target.create_iscsi_target,
-                self.test_vol, 1, 0, self.fake_volumes_dir)
-            # 6 - default retries count value for _do_tgt_update
-            self.assertEqual(6, tgt_admin_update_count[0])
