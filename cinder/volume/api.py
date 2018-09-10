@@ -13,9 +13,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-#
-# Copyright (c) 2014 Wind River Systems, Inc.
-#
 
 """Handles all requests relating to volumes."""
 
@@ -23,7 +20,6 @@ import ast
 import collections
 import datetime
 import functools
-import os
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -91,7 +87,6 @@ CONF.register_opt(volume_same_az_opt)
 CONF.register_opt(az_cache_time_opt)
 
 CONF.import_opt('glance_core_properties', 'cinder.image.glance')
-CONF.import_opt('backup_dir', 'cinder.volume.driver')
 
 LOG = logging.getLogger(__name__)
 QUOTAS = quota.QUOTAS
@@ -2143,97 +2138,6 @@ class API(base.Base):
             volume.attach_status = 'detached'
             volume.save()
         return remaining_attachments
-
-    @wrap_check_policy
-    def export_volume(self, context, volume):
-        """Export the specified volume to a file."""
-
-        if volume['status'] not in ['available']:
-            msg = _('Volume status must be available.')
-            raise exception.InvalidVolume(reason=msg)
-
-        self.update(context, volume, {'status': 'exporting'})
-        status = "Export started at %s" % str(timeutils.utcnow())
-        self.update(context, volume, {'backup_status': status})
-
-        self.volume_rpcapi.export_volume(context,
-                                         volume)
-
-        response = {"id": volume['id'],
-                    "updated_at": volume['updated_at'],
-                    "status": 'exporting',
-                    "display_description": volume['display_description'],
-                    "size": volume['size'],
-                    "volume_type": volume['volume_type']}
-        return response
-
-    @wrap_check_policy
-    def import_volume(self, context, volume, file_name):
-        """Import the specified volume from a file."""
-
-        # Check whether file exists. NOTE: In order to provide an immediate and
-        # useful error message to the user here, I am making the assumption
-        # that the cinder-volume and cinder-api services are running on the
-        # same physical node (which is true for CGCS). If that ever changes,
-        # then this check can be removed from the API (it is also being done
-        # in the cinder-volume service).
-        file_path = os.path.join(CONF.backup_dir, file_name)
-        if not os.path.isfile(file_path):
-            raise exception.FileNotFound(file_path=file_path)
-
-        if volume['status'] not in ['available', 'error']:
-            msg = _('Volume status must be available or error.')
-            raise exception.InvalidVolume(reason=msg)
-
-        snapshots = self.db.snapshot_get_all_for_volume(context, volume['id'])
-        if len(snapshots):
-            msg = _("Volume has %d dependent snapshots") % len(snapshots)
-            raise exception.InvalidVolume(reason=msg)
-
-        self.update(context, volume, {'status': 'importing'})
-        status = "Import started at %s" % str(timeutils.utcnow())
-        self.update(context, volume, {'backup_status': status})
-
-        self.volume_rpcapi.import_volume(context,
-                                         volume,
-                                         file_name)
-
-        response = {"id": volume['id'],
-                    "updated_at": volume['updated_at'],
-                    "status": 'importing',
-                    "display_description": volume['display_description'],
-                    "size": volume['size'],
-                    "volume_type": volume['volume_type']}
-        return response
-
-    @wrap_check_policy
-    def export_snapshot(self, context, snapshot):
-        """Export the specified snapshot to a file."""
-
-        if snapshot['status'] not in ['available']:
-            msg = _('Snapshot status must be available.')
-            raise exception.InvalidSnapshot(reason=msg)
-
-        volume = self.db.volume_get(context, snapshot['volume_id'])
-
-        self.update_snapshot(context, snapshot,
-                             {'status': fields.SnapshotStatus.EXPORTING})
-        status = "Export started at %s" % str(timeutils.utcnow())
-        self.update_snapshot(context, snapshot, {'backup_status': status})
-        status = "Snapshot export started at %s" % str(timeutils.utcnow())
-        self.update(context, volume, {'backup_status': status})
-
-        self.volume_rpcapi.export_snapshot(context,
-                                           snapshot,
-                                           volume)
-
-        response = {"id": snapshot['id'],
-                    "updated_at": snapshot['updated_at'],
-                    "status": fields.SnapshotStatus.EXPORTING,
-                    "display_description": snapshot['display_description'],
-                    "volume_size": volume['size'],
-                    "volume_type": volume['volume_type']}
-        return response
 
 
 class HostAPI(base.Base):

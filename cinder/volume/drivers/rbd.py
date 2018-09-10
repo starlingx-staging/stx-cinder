@@ -1495,38 +1495,3 @@ class RBDDriver(driver.CloneableImageVD,
             snapshot_name = existing_ref['source-name']
             volume.rename_snap(utils.convert_str(snapshot_name),
                                utils.convert_str(snapshot.name))
-
-    def copy_volume_to_file(self, context, volume, dest_file):
-        """Copies a volume to a file."""
-
-        with fileutils.remove_path_on_error(dest_file):
-            args = ['rbd', 'export',
-                    '--pool', self.configuration.rbd_pool,
-                    volume['name'], dest_file]
-            args.extend(self._ceph_args())
-            self._try_execute(*args)
-
-    def copy_file_to_volume(self, context, src_file, volume):
-        """Copies a file to a volume."""
-
-        # Delete the volume before importing
-        self.delete_volume(volume)
-
-        # keep using the command line import instead of librbd since it
-        # detects zeroes to preserve sparseness in the image
-        args = ['rbd', 'import',
-                '--pool', self.configuration.rbd_pool,
-                src_file, volume['name'], '--new-format']
-        args.extend(self._ceph_args())
-        self._try_execute(*args)
-
-    def copy_snapshot_to_file(self, snapshot, dest_file):
-        """Copies a snapshot to a file."""
-
-        with fileutils.remove_path_on_error(dest_file):
-            args = ['rbd', 'export',
-                    '--pool', self.configuration.rbd_pool,
-                    snapshot['volume_name'],
-                    '--snap', snapshot['name'], dest_file]
-            args.extend(self._ceph_args())
-            self._try_execute(*args)

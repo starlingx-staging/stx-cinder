@@ -15,9 +15,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-#
-# Copyright (c) 2014 Wind River Systems, Inc.
-#
 """
 SQLAlchemy models for cinder data.
 """
@@ -275,7 +272,6 @@ class Volume(BASE, CinderBase):
     status = Column(String(255))  # TODO(vish): enum?
     attach_status = Column(String(255))  # TODO(vish): enum
     migration_status = Column(String(255))
-    backup_status = Column(String(255))
 
     scheduled_at = Column(DateTime)
     launched_at = Column(DateTime)
@@ -693,7 +689,6 @@ class Snapshot(BASE, CinderBase):
     cgsnapshot_id = Column(String(36))
     group_snapshot_id = Column(String(36))
     status = Column(String(255))
-    backup_status = Column(String(255))
     progress = Column(String(255))
     volume_size = Column(Integer)
 

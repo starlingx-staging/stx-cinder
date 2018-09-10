@@ -11,9 +11,6 @@
 #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #   License for the specific language governing permissions and limitations
 #   under the License.
-#
-# Copyright (c) 2014 Wind River Systems, Inc.
-#
 
 """The Extended Snapshot Attributes API extension."""
 
@@ -55,7 +52,7 @@ class Extended_snapshot_attributes(extensions.ExtensionDescriptor):
 
     name = "ExtendedSnapshotAttributes"
     alias = "os-extended-snapshot-attributes"
-    updated = "2014-09-19T00:00:00+00:00"
+    updated = "2012-06-19T00:00:00+00:00"
 
     def get_controller_extensions(self):
         controller = ExtendedSnapshotAttributesController()

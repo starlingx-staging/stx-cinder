@@ -60,8 +60,7 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
     # Version 1.4: Added cluster fields
     # Version 1.5: Added group
     # Version 1.6: This object is now cleanable (adds rows to workers table)
-    # Version 1.7: WRS: Added backup_status
-    VERSION = '1.7'
+    VERSION = '1.6'
 
     OPTIONAL_FIELDS = ('metadata', 'admin_metadata', 'glance_metadata',
                        'volume_type', 'volume_attachment', 'consistencygroup',
@@ -125,8 +124,6 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
                                                nullable=True),
         'snapshots': fields.ObjectField('SnapshotList', nullable=True),
         'group': fields.ObjectField('Group', nullable=True),
-
-        'backup_status': fields.StringField(nullable=True),
     }
 
     # NOTE(thangp): obj_extra_fields is used to hold properties that are not
