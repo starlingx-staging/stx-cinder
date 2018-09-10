@@ -198,7 +198,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
             volume_path = self.volume.driver.local_path(dst_volume)
             snapshot_path = self.volume.driver.local_path(snapshot_ref)
             volume_size = 1024
-            block_size = '4M'
+            block_size = '1M'
             mock_copy.assert_called_with(snapshot_path,
                                          volume_path,
                                          volume_size,
@@ -532,7 +532,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
                 '/dev/mapper/cinder--volumes-testvol',
                 '/dev/mapper/cinder--volumes--2-testvol',
                 2048,
-                '4M',
+                '1M',
                 execute=mock_execute,
                 sparse=False)
 
@@ -581,7 +581,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
                 '/dev/mapper/cinder--volumes-testvol',
                 '/dev/mapper/cinder--volumes--2-testvol',
                 2048,
-                '4M',
+                '1M',
                 execute=mock_execute,
                 sparse=True)
 

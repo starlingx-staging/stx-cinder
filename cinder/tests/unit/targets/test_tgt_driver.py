@@ -342,9 +342,7 @@ class TestTgtAdmDriver(tf.TargetDriverFixture):
         expected_result = {'location': '10.9.8.7:3260,1 ' +
                            self.iscsi_target_prefix +
                            self.testvol['name'] + ' 1',
-                           'auth': 'CHAP ' +
-                           'stack-1-a60e2611875f40199931f2c76370d66b ' +
-                           '2FE0CQ8J196R'}
+                           'auth': 'CHAP QZJb P68e'}
 
         with mock.patch('cinder.utils.execute', return_value=('', '')),\
                 mock.patch.object(self.target, '_get_target',

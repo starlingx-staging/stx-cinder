@@ -140,7 +140,6 @@ def define_tables(meta):
         Column('provider_id', String(255)),
         Column('multiattach', Boolean),
         Column('previous_status', String(255)),
-        Column('backup_status', String(255)),
         mysql_engine='InnoDB',
         mysql_charset='utf8'
     )
@@ -205,7 +204,6 @@ def define_tables(meta):
                ForeignKey('cgsnapshots.id')),
         Column('provider_id', String(255)),
         Column('provider_auth', String(255)),
-        Column('backup_status', String(255)),
         mysql_engine='InnoDB',
         mysql_charset='utf8'
     )

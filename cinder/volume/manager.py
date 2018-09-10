@@ -13,9 +13,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-#
-# Copyright (c) 2014-2016 Wind River Systems, Inc.
-#
 
 """
 Volume manager manages creating, attaching, detaching, and persistent storage.
@@ -4437,108 +4434,6 @@ class VolumeManager(manager.CleanableManager,
 
         connection_info['attachment_id'] = attachment.id
         return connection_info
-
-    def export_volume(self, context, volume_id):
-        """Exports the specified volume to a file."""
-        payload = {'volume_id': volume_id}
-        try:
-            utils.require_driver_initialized(self.driver)
-            volume = self.db.volume_get(context, volume_id)
-            self.driver.export_volume(context, volume)
-            LOG.debug("Exported volume %(volume_id)s successfully",
-                      {'volume_id': volume_id})
-            status = "Export completed at %s" % str(timeutils.utcnow())
-            self.db.volume_update(context, volume_id,
-                                  {'backup_status': status})
-
-        except Exception as error:
-            with excutils.save_and_reraise_exception():
-                if hasattr(error, 'stderr'):
-                    reason = error.stderr
-                else:
-                    reason = six.text_type(error)
-                status = "Export failed at %s. Reason: %s" % (
-                    str(timeutils.utcnow()), reason)
-                self.db.volume_update(context, volume_id,
-                                      {'backup_status': status[:255]})
-                payload['message'] = six.text_type(error)
-        finally:
-            self.db.volume_update(context, volume_id,
-                                  {'status': 'available'})
-
-    def import_volume(self, context, volume_id, file_name):
-        """Imports the specified volume from a file.
-
-        file_name is an absolute path to the file to be imported
-
-        """
-        payload = {'volume_id': volume_id, 'file_name': file_name}
-        updated_status = 'available'
-        try:
-            utils.require_driver_initialized(self.driver)
-            volume = self.db.volume_get(context, volume_id)
-            updated_status = self.driver.import_volume(context, volume,
-                                                       file_name)
-            LOG.debug("Imported volume %(volume_id)s from "
-                      "file (%(file_name)s) successfully",
-                      {'volume_id': volume_id, 'file_name': file_name})
-            status = "Import completed at %s" % str(timeutils.utcnow())
-            self.db.volume_update(context, volume_id,
-                                  {'backup_status': status})
-        except Exception as error:
-            with excutils.save_and_reraise_exception():
-                payload['message'] = six.text_type(error)
-                self.db.volume_update(context, volume_id,
-                                      {'status': 'error'})
-                if hasattr(error, 'stderr'):
-                    reason = error.stderr
-                else:
-                    reason = six.text_type(error)
-                status = "Import failed at %s. Reason: %s" % (
-                    str(timeutils.utcnow()), reason)
-                self.db.volume_update(context, volume_id,
-                                      {'backup_status': status[:255]})
-
-        self.db.volume_update(context, volume_id,
-                              {'status': updated_status})
-
-    def export_snapshot(self, context, snapshot_id, volume_id):
-        """Exports the specified snapshot to a file."""
-        payload = {'snapshot_id': snapshot_id,
-                   'volume_id': volume_id}
-        try:
-            utils.require_driver_initialized(self.driver)
-            snapshot = self.db.snapshot_get(context, snapshot_id)
-            volume = self.db.volume_get(context, volume_id)
-            self.driver.export_volume(context, volume, snapshot)
-            LOG.debug("Exported snapshot %(snapshot_id)s volume "
-                      "%(volume_id)s successfully",
-                      {'snapshot_id': snapshot_id, 'volume_id': volume_id})
-            status = "Export completed at %s" % str(timeutils.utcnow())
-            self.db.snapshot_update(context, snapshot_id,
-                                    {'backup_status': status})
-            status = ("Snapshot export completed at %s" %
-                      str(timeutils.utcnow()))
-            self.db.volume_update(context, volume_id,
-                                  {'backup_status': status})
-        except Exception as error:
-            with excutils.save_and_reraise_exception():
-                payload['message'] = six.text_type(error)
-                if hasattr(error, 'stderr'):
-                    reason = error.stderr
-                else:
-                    reason = six.text_type(error)
-                status = "Export failed at %s. Reason: %s" % (
-                    str(timeutils.utcnow()), reason)
-                self.db.snapshot_update(context, snapshot_id,
-                                        {'backup_status': status[:255]})
-                status = "Snapshot export failed at %s. Reason: %s" % (
-                    str(timeutils.utcnow()), reason)
-                self.db.volume_update(context, volume_id,
-                                      {'backup_status': status[:255]})
-        finally:
-            self.db.snapshot_update(context, snapshot_id,
-                                    {'status': 'available'})
 
     def attachment_update(self,
                           context,
