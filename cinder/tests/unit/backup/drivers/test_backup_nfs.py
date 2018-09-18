@@ -25,6 +25,7 @@ import tempfile
 import threading
 import zlib
 
+from eventlet import tpool
 import mock
 from os_brick.remotefs import remotefs as remotefs_brick
 from oslo_config import cfg
@@ -143,6 +144,16 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
                   }
         return db.backup_create(self.ctxt, backup)['id']
 
+    def _write_effective_compression_file(self, data_size):
+        """Ensure file contents can be effectively compressed."""
+        self.volume_file.seek(0)
+        self.volume_file.write(bytes([65] * data_size))
+        self.volume_file.seek(0)
+
+    def _store_thread(self, *args, **kwargs):
+        self.thread_dict['thread'] = threading.current_thread()
+        return self.thread_original_method(*args, **kwargs)
+
     def setUp(self):
         super(BackupNFSSwiftBasedTestCase, self).setUp()
 
@@ -162,8 +173,13 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
                          return_value=mock_remotefsclient)
         # Remove tempdir.
         self.addCleanup(shutil.rmtree, self.temp_dir)
+        self.size_volume_file = 0
         for _i in range(0, 32):
             self.volume_file.write(os.urandom(1024))
+            self.size_volume_file += 1024
+
+        # Use dictionary to share data between threads
+        self.thread_dict = {}
 
     def test_backup_uncompressed(self):
         volume_id = fake.VOLUME_ID
@@ -179,7 +195,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -188,7 +204,7 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(self.size_volume_file)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -565,14 +581,17 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
                             restored_file.name))
 
     def test_restore_bz2(self):
+        self.thread_original_method = bz2.decompress
         volume_id = fake.VOLUME_ID
+        self.mock_object(bz2, 'decompress', side_effect=self._store_thread)
 
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='bz2')
-        self.flags(backup_file_size=(1024 * 3))
+        file_size = 1024 * 3
+        self.flags(backup_file_size=file_size)
         self.flags(backup_sha_block_size_bytes=1024)
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(file_size)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -582,15 +601,21 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
             self.assertTrue(filecmp.cmp(self.volume_file.name,
                             restored_file.name))
 
+        self.assertNotEqual(threading.current_thread(),
+                            self.thread_dict['thread'])
+
     def test_restore_zlib(self):
+        self.thread_original_method = zlib.decompress
+        self.mock_object(zlib, 'decompress', side_effect=self._store_thread)
         volume_id = fake.VOLUME_ID
 
         self._create_backup_db_entry(volume_id=volume_id)
         self.flags(backup_compression_algorithm='zlib')
-        self.flags(backup_file_size=(1024 * 3))
+        file_size = 1024 * 3
+        self.flags(backup_file_size=file_size)
         self.flags(backup_sha_block_size_bytes=1024)
         service = nfs.NFSBackupDriver(self.ctxt)
-        self.volume_file.seek(0)
+        self._write_effective_compression_file(file_size)
         backup = objects.Backup.get_by_id(self.ctxt, fake.BACKUP_ID)
         service.backup(backup, self.volume_file)
 
@@ -599,6 +624,9 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
             service.restore(backup, volume_id, restored_file)
             self.assertTrue(filecmp.cmp(self.volume_file.name,
                             restored_file.name))
+
+        self.assertNotEqual(threading.current_thread(),
+                            self.thread_dict['thread'])
 
     def test_restore_delta(self):
         volume_id = fake.VOLUME_ID
@@ -662,8 +690,10 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
         self.assertIsNone(compressor)
         compressor = service._get_compressor('zlib')
         self.assertEqual(compressor, zlib)
+        self.assertIsInstance(compressor, tpool.Proxy)
         compressor = service._get_compressor('bz2')
         self.assertEqual(compressor, bz2)
+        self.assertIsInstance(compressor, tpool.Proxy)
         self.assertRaises(ValueError, service._get_compressor, 'fake')
 
     def create_buffer(self, size):
@@ -678,24 +708,18 @@ class BackupNFSSwiftBasedTestCase(test.TestCase):
 
     def test_prepare_output_data_effective_compression(self):
         """Test compression works on a native thread."""
-        # Use dictionary to share data between threads
-        thread_dict = {}
-        original_compress = zlib.compress
-
-        def my_compress(data, *args, **kwargs):
-            thread_dict['compress'] = threading.current_thread()
-            return original_compress(data)
+        self.thread_original_method = zlib.compress
+        self.mock_object(zlib, 'compress', side_effect=self._store_thread)
 
         service = nfs.NFSBackupDriver(self.ctxt)
         fake_data = self.create_buffer(128)
-        with mock.patch.object(service.compressor, 'compress',
-                               side_effect=my_compress):
-            result = service._prepare_output_data(fake_data)
+
+        result = service._prepare_output_data(fake_data)
 
         self.assertEqual('zlib', result[0])
         self.assertGreater(len(fake_data), len(result[1]))
         self.assertNotEqual(threading.current_thread(),
-                            thread_dict['compress'])
+                            self.thread_dict['thread'])
 
     def test_prepare_output_data_no_compresssion(self):
         self.flags(backup_compression_algorithm='none')
