@@ -4798,6 +4798,8 @@ class VMAXMaskingTest(test.TestCase):
         configuration.config_group = 'MaskingTests'
         self._gather_info = common.VMAXCommon._gather_info
         common.VMAXCommon._gather_info = mock.Mock()
+        rest.VMAXRest._establish_rest_session = mock.Mock(
+            return_value=FakeRequestsSession())
         driver = common.VMAXCommon(
             'iSCSI', common.VMAXCommon.VERSION, configuration=configuration)
         driver_fc = common.VMAXCommon(

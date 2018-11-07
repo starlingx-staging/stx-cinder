@@ -2303,6 +2303,7 @@ class GPFSNFSDriverTestCase(test.TestCase):
                            mock_volume_path,
                            mock_local_path,
                            mock_delete_gpfs_file):
+        mock_local_path.return_value = '/tmp/abc123'
         self.driver.delete_volume('')
 
     @mock.patch('cinder.volume.drivers.ibm.gpfs.GPFSDriver.'
