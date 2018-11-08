@@ -1508,6 +1508,10 @@ class TestVhdUtils(test.TestCase):
     @mock.patch('cinder.image.image_utils.utils.execute')
     def test_coalesce_chain(self, mock_exec, mock_size, mock_resize,
                             mock_coal, mock_temp):
+
+        # os.path.join does not work with MagicMock objects in py36.
+        mock_temp.return_value.__enter__.return_value = 'fake_temp_dir'
+
         vhd_chain = (mock.sentinel.first,
                      mock.sentinel.second,
                      mock.sentinel.third,

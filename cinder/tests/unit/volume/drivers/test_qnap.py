@@ -26,6 +26,7 @@ import six
 from six.moves import urllib
 
 from cinder import test
+from cinder import utils
 from cinder.volume.drivers import qnap
 
 CONF = cfg.CONF
@@ -316,6 +317,14 @@ class QnapDriverBaseTestCase(test.TestCase):
         self.driver = None
         self.mock_HTTPConnection = None
         self.mock_object(qnap.QnapISCSIDriver, 'TIME_INTERVAL', 0)
+
+    @staticmethod
+    def sanitize(params):
+        sanitized = {_key: six.text_type(_value)
+                     for _key, _value in six.iteritems(params)
+                     if _value is not None}
+        sanitized = utils.create_ordereddict(sanitized)
+        return urllib.parse.urlencode(sanitized)
 
     @staticmethod
     def driver_mock_decorator(configuration):
@@ -1206,15 +1215,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['LUNCapacity'] = 100
         fake_params['lv_threshold'] = '80'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
 
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         create_lun_url = (
-            '/cgi-bin/disk/iscsi_lun_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_lun_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1253,16 +1257,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['ha_sync'] = '1'
         fake_params['LUNIndex'] = 'fakeLunIndex'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         delete_lun_url = (
-            '/cgi-bin/disk/iscsi_lun_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_lun_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1302,15 +1300,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['Pool_Info'] = '1'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_specific_poolinfo_url = (
-            '/cgi-bin/disk/disk_manage.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/disk_manage.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1352,16 +1344,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['controller_name'] = 'sca'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         create_target_url = (
-            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_target_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1409,16 +1394,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['ha_sync'] = '1'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         add_target_init_url = (
-            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_target_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1458,16 +1436,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['targetIndex'] = 'fakeTargetIndex'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         map_lun_url = (
-            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_target_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1507,15 +1478,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['targetIndex'] = 'fakeTargetIndex'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         unmap_lun_url = (
-            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_target_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1553,15 +1518,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['iSCSI_portal'] = '1'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_iscsi_portal_info_url = (
-            '/cgi-bin/disk/iscsi_portal_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1598,16 +1557,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['func'] = 'extra_get'
         fake_params['lunList'] = '1'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
-
+        fake_post_params = self.sanitize(fake_params)
         get_lun_info_url = (
-            '/cgi-bin/disk/iscsi_portal_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1648,16 +1601,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['snap_start'] = '0'
         fake_params['snap_count'] = '100'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_snapshot_info_url = (
-            '/cgi-bin/disk/snapshot.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/snapshot.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1699,16 +1646,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['vital'] = '1'
         fake_params['snapshot_type'] = '0'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         create_snapshot_api_url = (
-            '/cgi-bin/disk/snapshot.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/snapshot.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1745,16 +1686,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['func'] = 'del_snapshots'
         fake_params['snapshotID'] = 'fakeSnapshotId'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         api_delete_snapshot_url = (
-            '/cgi-bin/disk/snapshot.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/snapshot.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1794,16 +1729,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['snapshotID'] = 'fakeSnapshotId'
         fake_params['new_name'] = 'fakeLunName'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         clone_snapshot_url = (
-            '/cgi-bin/disk/snapshot.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/snapshot.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1852,16 +1781,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['LUNStatus'] = 'fakeLunStatus'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         edit_lun_url = (
-            '/cgi-bin/disk/iscsi_lun_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_lun_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1942,16 +1864,10 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params = {}
         fake_params['subfunc'] = 'net_setting'
         fake_params['sid'] = 'fakeSid'
-        sanitized_params = {}
 
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_ethernet_ip_url = (
-            '/cgi-bin/sys/sysRequest.cgi?%s' % sanitized_params)
+            '/cgi-bin/sys/sysRequest.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -1990,15 +1906,9 @@ class QnapAPIExecutorTestCase(QnapDriverBaseTestCase):
         fake_params['targetIndex'] = 'fakeTargetIndex'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_target_info_url = (
-            '/cgi-bin/disk/iscsi_portal_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -2043,15 +1953,9 @@ class QnapAPIExecutorTsTestCase(QnapDriverBaseTestCase):
         fake_params['ha_sync'] = '1'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         remove_target_init_url = (
-            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_target_setting.cgi?%s' % fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -2091,15 +1995,9 @@ class QnapAPIExecutorTsTestCase(QnapDriverBaseTestCase):
         fake_params['ha_sync'] = '1'
         fake_params['sid'] = 'fakeSid'
 
-        sanitized_params = {}
-        for key in fake_params:
-            value = fake_params[key]
-            if value is not None:
-                sanitized_params[key] = six.text_type(value)
-
-        sanitized_params = urllib.parse.urlencode(sanitized_params)
+        fake_post_params = self.sanitize(fake_params)
         get_target_info_url = (
-            '/cgi-bin/disk/iscsi_portal_setting.cgi?%s' % sanitized_params)
+            '/cgi-bin/disk/iscsi_portal_setting.cgi?' + fake_post_params)
 
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
@@ -2133,8 +2031,13 @@ class QnapAPIExecutorTsTestCase(QnapDriverBaseTestCase):
         self.driver.api_executor.get_ethernet_ip(
             type='data')
 
+        fake_params = {}
+        fake_params['sid'] = 'fakeSid'
+        fake_params['subfunc'] = 'net_setting'
+
+        fake_post_params = self.sanitize(fake_params)
         get_ethernet_ip_url = (
-            '/cgi-bin/sys/sysRequest.cgi?subfunc=net_setting&sid=fakeSid')
+            '/cgi-bin/sys/sysRequest.cgi?' + fake_post_params)
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
             mock.call('GET', get_basic_info_url),
@@ -2171,8 +2074,14 @@ class QnapAPIExecutorTesTestCase(QnapDriverBaseTestCase):
         self.driver.api_executor.get_ethernet_ip(
             type='data')
 
+        fake_params = {}
+        fake_params['sid'] = 'fakeSid'
+        fake_params['subfunc'] = 'net_setting'
+
+        fake_post_params = self.sanitize(fake_params)
         get_ethernet_ip_url = (
-            '/cgi-bin/sys/sysRequest.cgi?subfunc=net_setting&sid=fakeSid')
+            '/cgi-bin/sys/sysRequest.cgi?' + fake_post_params)
+
         expected_call_list = [
             mock.call('POST', login_url, global_sanitized_params, header),
             mock.call('GET', get_basic_info_url),
