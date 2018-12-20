@@ -1,0 +1,51 @@
+From daee10d79fa70ee567beef48d9c08a732433b097 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Mon, 11 Dec 2017 18:36:42 +0000
+Subject: [PATCH 37/53] Pike Rebase: LVM thin provisioning allocation checks -
+ Unit Test
+
+---
+ .../tests/unit/volume/drivers/test_lvm_driver.py   | 27 ++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/cinder/tests/unit/volume/drivers/test_lvm_driver.py b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+index dd02626..b5a7cca 100644
+--- a/cinder/tests/unit/volume/drivers/test_lvm_driver.py
++++ b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+@@ -243,6 +243,33 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+                                                    snapshot_ref)
+             mock_extend.assert_called_with(dst_volume, dst_volume['size'])
+ 
++    def test_snapshot_over_subscription(self):
++
++        self.configuration.lvm_type = 'thin'
++        self.configuration.max_over_subscription_ratio = 1
++        lvm_driver = lvm.LVMVolumeDriver(configuration=self.configuration,
++                                         db=db)
++        # Test case for thin LVM
++        lvm_driver._sparse_copy_volume = True
++        lvm_driver.vg = brick_lvm.LVM('cinder-volumes', 'sudo')
++        volume_size = 5
++
++        with mock.patch.object(self.volume.driver, '_create_volume'), \
++                mock.patch.object(lvm_driver.vg, 'get_volume',
++                                  return_value={'name': 'fake_lv',
++                                                'size': volume_size}), \
++                mock.patch.object(lvm_driver.vg, 'create_lv_snapshot'):
++            lvm_driver.vg.vg_size = 10
++            lvm_driver.vg.vg_provisioned_capacity = 8
++            fake_volume = tests_utils.create_volume(
++                self.context, size=volume_size)
++            fake_snapshot = tests_utils.create_snapshot(
++                self.context, fake_volume['id'])
++
++            self.assertRaises(exception.LVMThinPoolCapacityError,
++                              lvm_driver.create_snapshot,
++                              fake_snapshot)
++
+     @mock.patch.object(cinder.volume.utils, 'get_all_volume_groups',
+                        return_value=[{'name': 'cinder-volumes'}])
+     @mock.patch('cinder.brick.local_dev.lvm.LVM.update_volume_group_info')
+-- 
+2.7.4
+

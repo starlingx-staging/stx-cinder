@@ -1,0 +1,36 @@
+From 9210ac4aa2e1e8579fe5cf69dd4b20707d2634bb Mon Sep 17 00:00:00 2001
+From: Wen Shi <wen.shi@windriver.com>
+Date: Tue, 6 Feb 2018 08:47:06 -0600
+Subject: [PATCH 45/53] Changed cinder config for tox coverage
+
+---
+ tox.ini | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/tox.ini b/tox.ini
+index 3dac84d..117edfa 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -73,10 +73,17 @@ commands = bash tools/lintstack.sh
+ [testenv:cover]
+ # Also do not run test_coverage_ext tests while gathering coverage as those
+ # tests conflict with coverage.
++setenv =
++  VIRTUAL_ENV={envdir}
++  PYTHONHASHSEED=0
++  PYTHONWARNINGS=default::DeprecationWarning
++  PYTHON=coverage run --source cinder/tests/unit --omit .*test.*coverage.* --parallel-mode
++
+ commands =
+   coverage erase
+-  python setup.py testr --coverage \
+-    --testr-args='^(?!.*test.*coverage).*$'
++  ostestr {posargs}
++  coverage combine
++  coverage html -d cover
+   coverage xml
+ 
+ [testenv:genconfig]
+-- 
+2.7.4
+

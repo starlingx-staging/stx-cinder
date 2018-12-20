@@ -1,0 +1,69 @@
+From 23b26ed7c2155f7a4614cde0509c4116b6e79e3f Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Wed, 22 Nov 2017 20:14:38 +0000
+Subject: [PATCH 28/53] Pike Rebase: Enhanced logging and error reporting -
+ Unit Test
+
+Added unit test for TC5190
+---
+ .../tests/unit/targets/test_base_iscsi_driver.py   | 47 ++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/cinder/tests/unit/targets/test_base_iscsi_driver.py b/cinder/tests/unit/targets/test_base_iscsi_driver.py
+index 8c935a2..c2226d1 100644
+--- a/cinder/tests/unit/targets/test_base_iscsi_driver.py
++++ b/cinder/tests/unit/targets/test_base_iscsi_driver.py
+@@ -165,3 +165,50 @@ class TestBaseISCSITargetDriver(tf.TargetDriverFixture):
+                                                            self.testvol))
+         self.target.db.volume_get.assert_called_once_with(
+             ctxt, self.testvol['id'])
++
++    @mock.patch.object(iscsi.LOG, 'info')
++    def test_create_export_logs(self, mock_log_info):
++        ctxt = context.get_admin_context()
++        self.target.create_export(ctxt, self.testvol,
++                                  self.fake_volumes_dir)
++        self.assertNotEqual(
++            [],
++            [args for args, kwargs in mock_log_info.call_args_list
++             if args[0].startswith('Creating volume export for')])
++        self.assertNotEqual(
++            [],
++            [args for args, kwargs in mock_log_info.call_args_list
++             if args[0].startswith('Volume export for %s created')])
++
++    @mock.patch.object(iscsi.LOG, 'info')
++    def test_ensure_export_logs(self, mock_log_info):
++        ctxt = context.get_admin_context()
++        self.target.ensure_export(ctxt, self.testvol,
++                                  self.fake_volumes_dir)
++        self.assertNotEqual(
++            [],
++            [args for args, kwargs in mock_log_info.call_args_list
++             if args[0].startswith('Recreating volume export for')])
++        self.assertNotEqual(
++            [],
++            [args for args, kwargs in mock_log_info.call_args_list
++             if args[0].startswith('Volume export for %s created')])
++
++    @mock.patch.object(iscsi.LOG, 'info')
++    def test_remove_export_logs(self, mock_log_info):
++        with mock.patch.object(self.target, '_get_target_and_lun') as \
++                mock_get_target,\
++                mock.patch.object(self.target, 'show_target'),\
++                mock.patch.object(self.target, 'remove_iscsi_target'):
++            mock_get_target.return_value = (0, 1)
++            iscsi_target, lun = mock_get_target.return_value
++            ctxt = context.get_admin_context()
++            self.target.remove_export(ctxt, self.testvol)
++            self.assertNotEqual(
++                [],
++                [args for args, kwargs in mock_log_info.call_args_list
++                 if args[0].startswith('Removing volume export for')])
++            self.assertNotEqual(
++                [],
++                [args for args, kwargs in mock_log_info.call_args_list
++                 if args[0].startswith('Volume export for %s removed')])
+-- 
+2.7.4
+

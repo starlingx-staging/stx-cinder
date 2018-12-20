@@ -1,0 +1,97 @@
+From 3aa3afaa5509c9bbeb798b0f74b07f8bb20debc2 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Wed, 22 Nov 2017 20:15:34 +0000
+Subject: [PATCH 29/53] Pike Rebase: Enhanced logging and error reporting -
+ Unit Test
+
+Added unit test
+---
+ .../unit/volume/flows/test_create_volume_flow.py   | 58 ++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
+diff --git a/cinder/tests/unit/volume/flows/test_create_volume_flow.py b/cinder/tests/unit/volume/flows/test_create_volume_flow.py
+index 4fc98c4..80fb2f5 100644
+--- a/cinder/tests/unit/volume/flows/test_create_volume_flow.py
++++ b/cinder/tests/unit/volume/flows/test_create_volume_flow.py
+@@ -21,6 +21,7 @@ import mock
+ 
+ from castellan.common import exception as castellan_exc
+ from castellan.tests.unit.key_manager import mock_key_manager
++from oslo_concurrency import processutils
+ from oslo_utils import imageutils
+ 
+ from cinder import context
+@@ -36,6 +37,7 @@ from cinder.tests.unit import utils
+ from cinder.tests.unit.volume.flows import fake_volume_api
+ from cinder.volume.flows.api import create_volume
+ from cinder.volume.flows.manager import create_volume as create_volume_manager
++from cinder.volume import utils as volume_utils
+ 
+ 
+ @ddt.ddt
+@@ -953,6 +955,62 @@ class CreateVolumeFlowManagerTestCase(test.TestCase):
+             fake_driver.copy_image_to_volume.assert_called_once_with(
+                 self.ctxt, volume, fake_image_service, image_id)
+ 
++    @mock.patch.object(volume_utils, 'update_volume_fault')
++    def test__copy_image_to_volume_logs(self, mock_volume_fault):
++        fake_db = mock.MagicMock()
++        fake_driver = mock.MagicMock()
++        fake_volume_manager = mock.MagicMock()
++        fake_manager = create_volume_manager.CreateVolumeFromSpecTask(
++            fake_volume_manager, fake_db, fake_driver)
++        key = None
++        volume = fake_volume.fake_volume_obj(
++            self.ctxt,
++            encryption_key_id=key)
++
++        fake_image_service = fake_image.FakeImageService()
++        image_id = fakes.IMAGE_ID
++        image_meta = {'id': image_id}
++        image_location = 'abc'
++
++        fake_driver.copy_image_to_volume.side_effect = \
++            processutils.ProcessExecutionError()
++        self.assertRaises(
++            exception.ImageCopyFailure,
++            fake_manager._copy_image_to_volume,
++            self.ctxt, volume, image_meta,
++            image_location, fake_image_service)
++        fake_driver.copy_image_to_volume.assert_called_once_with(
++            self.ctxt, volume, fake_image_service, image_id)
++        mock_volume_fault.assert_called_once()
++
++        mock_volume_fault.reset_mock()
++        fake_driver.reset_mock()
++
++        fake_driver.copy_image_to_volume.side_effect = \
++            exception.ImageUnacceptable(image_id=image_id, reason='')
++        self.assertRaises(
++            exception.ImageUnacceptable,
++            fake_manager._copy_image_to_volume,
++            self.ctxt, volume, image_meta,
++            image_location, fake_image_service)
++        fake_driver.copy_image_to_volume.assert_called_once_with(
++            self.ctxt, volume, fake_image_service, image_id)
++        mock_volume_fault.assert_called_once()
++
++        mock_volume_fault.reset_mock()
++        fake_driver.reset_mock()
++
++        fake_driver.copy_image_to_volume.side_effect = \
++            exception.ImageCopyFailure(reason='')
++        self.assertRaises(
++            exception.ImageCopyFailure,
++            fake_manager._copy_image_to_volume,
++            self.ctxt, volume, image_meta,
++            image_location, fake_image_service)
++        fake_driver.copy_image_to_volume.assert_called_once_with(
++            self.ctxt, volume, fake_image_service, image_id)
++        mock_volume_fault.assert_called_once()
++
+ 
+ class CreateVolumeFlowManagerGlanceCinderBackendCase(test.TestCase):
+ 
+-- 
+2.7.4
+

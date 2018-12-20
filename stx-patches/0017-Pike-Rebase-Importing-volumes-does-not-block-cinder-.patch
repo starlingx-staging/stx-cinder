@@ -1,0 +1,125 @@
+From 5d733a406488320df0bb9ad085b0d6744a26e50c Mon Sep 17 00:00:00 2001
+From: Irina Mihai <irina.mihai@windriver.com>
+Date: Thu, 26 Jan 2017 17:45:04 +0200
+Subject: [PATCH 17/53] Pike Rebase: Importing volumes does not block
+ cinder-volume
+
+(cherry picked from commit 864bb4d54a05722fb9510a0794fad042ba086cf4)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/utils.py         | 19 +++++++++++++++++++
+ cinder/volume/driver.py | 40 ++++++++++++++++++----------------------
+ 2 files changed, 37 insertions(+), 22 deletions(-)
+
+diff --git a/cinder/utils.py b/cinder/utils.py
+index d44d7fc..0ffbaca 100644
+--- a/cinder/utils.py
++++ b/cinder/utils.py
+@@ -35,6 +35,7 @@ import socket
+ import stat
+ import subprocess
+ import sys
++import tarfile
+ import tempfile
+ import time
+ import types
+@@ -159,6 +160,24 @@ def piped_execute(cmd1, cmd2, **kwargs):
+     return p2.returncode, stderr
+ 
+ 
++def get_archive_meta_volume(file_name):
++    meta_file = None
++    volume_file = None
++    files = []
++    tar = tarfile.open(file_name)
++
++    for tarinfo in tar:
++        files.append(tarinfo.name)
++        if tarinfo.name.endswith('.meta'):
++            meta_file = tarinfo.name
++        elif tarinfo.name.endswith('.vol'):
++            volume_file = tarinfo.name
++
++    tar.close()
++
++    return files, meta_file, volume_file
++
++
+ def check_ssh_injection(cmd_list):
+     ssh_injection_pattern = ['`', '$', '|', '||', ';', '&', '&&', '>', '>>',
+                              '<']
+diff --git a/cinder/volume/driver.py b/cinder/volume/driver.py
+index f7aa5e7..ff0a53a 100644
+--- a/cinder/volume/driver.py
++++ b/cinder/volume/driver.py
+@@ -27,10 +27,12 @@ import time
+ 
+ import os
+ from os_brick import exception as brick_exception
++import pipes
+ import shutil
+-import tarfile
+ import tempfile
+ 
++import eventlet
++
+ from oslo_concurrency import processutils
+ from oslo_config import cfg
+ from oslo_config import types
+@@ -2220,18 +2222,9 @@ class BaseVD(object):
+         temp_dir = tempfile.mkdtemp(dir=work_dir)
+ 
+         # Check the contents of the tar file
+-        tar = tarfile.open(file_name)
+-
+         # Find the meta and volume files
+-        meta_file = None
+-        volume_file = None
+-        files = []
+-        for tarinfo in tar:
+-            files.append(tarinfo.name)
+-            if tarinfo.name.endswith('.meta'):
+-                meta_file = tarinfo.name
+-            elif tarinfo.name.endswith('.vol'):
+-                volume_file = tarinfo.name
++        files, meta_file, volume_file = eventlet.tpool.execute(
++            utils.get_archive_meta_volume, file_name)
+ 
+         if not meta_file:
+             shutil.rmtree(temp_dir)
+@@ -2244,19 +2237,22 @@ class BaseVD(object):
+ 
+         # Extract the contents of the tar file; pipe through 'dd' to
+         # to enable O_DIRECT and larger blocksize.
+-        tar.close()
+         dd_opts = "oflag=direct"
+         for fn in files:
+-            cmd1 = ['tar', '-xzf', file_name, fn, '-O']
+-            cmd2 = ['dd', 'of=%s/%s' % (temp_dir, fn), dd_opts,
+-                    'obs=%s' % self.configuration.volume_dd_blocksize]
++            args = ["/usr/bin/bash", "-c",
++                    ("tar -xzf '{0}' '{1}' -O "
++                     "| "
++                     "dd of='{2}/{3}' {4} obs='{5}'").format(
++                        pipes.quote(file_name), pipes.quote(fn),
++                        pipes.quote(temp_dir), pipes.quote(fn), dd_opts,
++                        self.configuration.volume_dd_blocksize)]
+             try:
+-                ret, stderr = utils.piped_execute(cmd1, cmd2, run_as_root=True)
+-                if ret:
+-                    msg = (_("tar/dd failed - (ret=%(ret)s stderr=%(stderr)s)")
+-                           % {'ret': ret, 'stderr': stderr})
+-                    LOG.info(msg)
+-                    raise exception.CinderException(msg)
++                self._try_execute(*args, run_as_root=True)
++            except processutils.ProcessExecutionError as e:
++                msg = (_("tar/dd failed - (ret=%(ret)s stderr=%(stderr)s)")
++                       % {'ret': e.exit_code, 'stderr': e.stderr})
++                LOG.info(msg)
++                raise exception.CinderException(msg)
+             except Exception:
+                 with excutils.save_and_reraise_exception():
+                     msg = _("Failed to extract tar file (src)s to %(dest)s")
+-- 
+2.7.4
+

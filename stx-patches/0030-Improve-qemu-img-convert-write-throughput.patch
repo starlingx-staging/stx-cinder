@@ -1,0 +1,175 @@
+From 10018d2cac68b8d29ca43ae691dde6ebacd25446 Mon Sep 17 00:00:00 2001
+From: Jim Gauld <james.gauld@windriver.com>
+Date: Wed, 8 Nov 2017 14:53:18 -0500
+Subject: [PATCH 30/53] Improve qemu-img convert write throughput
+
+This update appends performance option "-W" to "qemu-img convert" to
+enable writing the target out-of-order instead of serialized.
+
+See improved convert write throughput:
+ - 1.25x for CentOS/raw
+ - 1.9x for Ubuntu/QCOW2
+
+This update also appends ", duration x sec" for image download and
+image convert logs in cinder-volume.log .
+
+Conflicts:
+	cinder/image/image_utils.py
+---
+ cinder/image/image_utils.py           | 15 ++++++-----
+ cinder/tests/unit/test_image_utils.py | 49 ++++++++++++++++++++---------------
+ 2 files changed, 37 insertions(+), 27 deletions(-)
+
+diff --git a/cinder/image/image_utils.py b/cinder/image/image_utils.py
+index 49903e9..3338d8e 100644
+--- a/cinder/image/image_utils.py
++++ b/cinder/image/image_utils.py
+@@ -133,8 +133,9 @@ def _convert_image(prefix, source, dest, out_format,
+                    src_format=None, run_as_root=True):
+     """Convert image to other format."""
+ 
++    # WRS: Append '-W' option to write out-of-order instead of sequential.
+     cmd = prefix + ('qemu-img', 'convert',
+-                    '-O', out_format, source, dest)
++                    '-W', '-O', out_format, source, dest)
+ 
+     # Check whether O_DIRECT is supported and set '-t none' if it is
+     # This is needed to ensure that all data hit the device before
+@@ -150,7 +151,7 @@ def _convert_image(prefix, source, dest, out_format,
+                                                    dest,
+                                                    'oflag=direct')):
+         cmd = prefix + ('qemu-img', 'convert',
+-                        '-t', 'none')
++                        '-t', 'none', '-W')
+ 
+         # AMI images can be raw or qcow2 but qemu-img doesn't accept "ami" as
+         # an image format, so we use automatic detection.
+@@ -203,8 +204,9 @@ def _convert_image(prefix, source, dest, out_format,
+                     "duration": duration,
+                     "dest": dest})
+ 
+-    msg = "Converted %(sz).2f MB image at %(mbps).2f MB/s"
+-    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
++    msg = ("Converted %(sz).2f MB image at %(mbps).2f MB/s, "
++           "duration %(dur).1f sec")
++    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps, 'dur': duration})
+ 
+ 
+ def convert_image(source, dest, out_format, src_format=None,
+@@ -259,8 +261,9 @@ def fetch(context, image_service, image_id, path, _user_id, _project_id):
+     LOG.debug(msg, {"dest": image_file.name,
+                     "sz": fsz_mb,
+                     "duration": duration})
+-    msg = "Image download %(sz).2f MB at %(mbps).2f MB/s"
+-    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps})
++    msg = ("Image download %(sz).2f MB at %(mbps).2f MB/s, "
++           "duration %(dur).1f sec")
++    LOG.info(msg, {"sz": fsz_mb, "mbps": mbps, "dur": duration})
+ 
+ 
+ def get_qemu_data(image_id, has_meta, disk_format_raw, dest, run_as_root):
+diff --git a/cinder/tests/unit/test_image_utils.py b/cinder/tests/unit/test_image_utils.py
+index 9a4a728..752f01f 100644
+--- a/cinder/tests/unit/test_image_utils.py
++++ b/cinder/tests/unit/test_image_utils.py
+@@ -137,9 +137,10 @@ class TestConvertImage(test.TestCase):
+                                                throttle=throttle)
+ 
+             self.assertIsNone(output)
+-            mock_exec.assert_called_once_with('cgcmd', 'qemu-img', 'convert',
+-                                              '-t', 'none', '-O', out_format,
+-                                              source, dest, run_as_root=True)
++            mock_exec.assert_called_once_with(
++                'cgcmd', 'qemu-img', 'convert',
++                '-t', 'none', '-W', '-O', out_format,
++                source, dest, run_as_root=True)
+ 
+         mock_exec.reset_mock()
+ 
+@@ -148,9 +149,10 @@ class TestConvertImage(test.TestCase):
+             output = image_utils.convert_image(source, dest, out_format)
+ 
+             self.assertIsNone(output)
+-            mock_exec.assert_called_once_with('qemu-img', 'convert',
+-                                              '-O', out_format, source, dest,
+-                                              run_as_root=True)
++            mock_exec.assert_called_once_with(
++                'qemu-img', 'convert',
++                '-W', '-O', out_format, source, dest,
++                run_as_root=True)
+ 
+     @mock.patch('cinder.image.image_utils.qemu_img_info')
+     @mock.patch('cinder.utils.execute')
+@@ -171,9 +173,10 @@ class TestConvertImage(test.TestCase):
+ 
+             mock_info.assert_called_once_with(source, run_as_root=True)
+             self.assertIsNone(output)
+-            mock_exec.assert_called_once_with('cgcmd', 'qemu-img', 'convert',
+-                                              '-t', 'none', '-O', out_format,
+-                                              source, dest, run_as_root=True)
++            mock_exec.assert_called_once_with(
++                'cgcmd', 'qemu-img', 'convert',
++                '-t', 'none', '-W', '-O', out_format,
++                source, dest, run_as_root=True)
+ 
+         mock_exec.reset_mock()
+ 
+@@ -182,9 +185,10 @@ class TestConvertImage(test.TestCase):
+             output = image_utils.convert_image(source, dest, out_format)
+ 
+             self.assertIsNone(output)
+-            mock_exec.assert_called_once_with('qemu-img', 'convert',
+-                                              '-O', out_format, source, dest,
+-                                              run_as_root=True)
++            mock_exec.assert_called_once_with(
++                'qemu-img', 'convert',
++                '-W', '-O', out_format, source, dest,
++                run_as_root=True)
+ 
+     @mock.patch('cinder.volume.utils.check_for_odirect_support',
+                 return_value=True)
+@@ -203,9 +207,10 @@ class TestConvertImage(test.TestCase):
+         output = image_utils.convert_image(source, dest, out_format)
+ 
+         self.assertIsNone(output)
+-        mock_exec.assert_called_once_with('qemu-img', 'convert', '-O',
+-                                          out_format, source, dest,
+-                                          run_as_root=True)
++        mock_exec.assert_called_once_with(
++            'qemu-img', 'convert', '-W', '-O',
++            out_format, source, dest,
++            run_as_root=True)
+ 
+     @mock.patch('cinder.volume.utils.check_for_odirect_support',
+                 return_value=True)
+@@ -225,9 +230,10 @@ class TestConvertImage(test.TestCase):
+         output = image_utils.convert_image(source, dest, out_format)
+ 
+         self.assertIsNone(output)
+-        mock_exec.assert_called_once_with('qemu-img', 'convert', '-O',
+-                                          out_format, source, dest,
+-                                          run_as_root=True)
++        mock_exec.assert_called_once_with(
++            'qemu-img', 'convert', '-W', '-O',
++            out_format, source, dest,
++            run_as_root=True)
+ 
+     @mock.patch('cinder.image.image_utils.qemu_img_info')
+     @mock.patch('cinder.utils.execute')
+@@ -245,9 +251,10 @@ class TestConvertImage(test.TestCase):
+                                                src_format='AMI')
+ 
+             self.assertIsNone(output)
+-            mock_exec.assert_called_once_with('qemu-img', 'convert',
+-                                              '-t', 'none', '-O', out_format,
+-                                              source, dest, run_as_root=True)
++            mock_exec.assert_called_once_with(
++                'qemu-img', 'convert',
++                '-t', 'none', '-W', '-O', out_format,
++                source, dest, run_as_root=True)
+ 
+ 
+ class TestResizeImage(test.TestCase):
+-- 
+2.7.4
+

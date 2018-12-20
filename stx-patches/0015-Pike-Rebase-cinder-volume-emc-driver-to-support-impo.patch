@@ -1,0 +1,168 @@
+From c46a9a1e84b8d905a49211e74ba4a7dfb5f4a7a7 Mon Sep 17 00:00:00 2001
+From: Vu Tran <vu.tran@windriver.com>
+Date: Tue, 3 Jan 2017 14:56:05 -0500
+Subject: [PATCH 15/53] Pike Rebase: cinder-volume emc driver to support import
+ export
+
+The export/import Cinder volume feature is TiS specific so add
+code to Cinder volume EMC driver to support this feature.
+
+The code here is mainly based on cinder.volume.driver.copy_volume_to_image()
+and cinder.volume.drivers.lvm.copy_volume_to_file() and
+cinder.volume.drivers.lvm.copy_file_to_volume()
+
+This patch does not support snapshot-export yet because our EMC
+system does not support snapshot.  But the code should be straight
+forward as well.
+
+(cherry picked from commit 189fdbf5b69f7542a7a3a5b930a6c9f4d256f1ca)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/volume/drivers/dell_emc/vnx/driver.py | 118 +++++++++++++++++++++++++++
+ 1 file changed, 118 insertions(+)
+
+diff --git a/cinder/volume/drivers/dell_emc/vnx/driver.py b/cinder/volume/drivers/dell_emc/vnx/driver.py
+index f28f1aa..3d0b09a 100644
+--- a/cinder/volume/drivers/dell_emc/vnx/driver.py
++++ b/cinder/volume/drivers/dell_emc/vnx/driver.py
+@@ -12,15 +12,24 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ """Cinder Driver for EMC VNX based on CLI."""
+ 
+ from oslo_log import log as logging
+ 
+ from cinder import interface
++from cinder import utils as cinder_utils
+ from cinder.volume import driver
+ from cinder.volume.drivers.dell_emc.vnx import adapter
+ from cinder.volume.drivers.dell_emc.vnx import common
+ from cinder.volume.drivers.dell_emc.vnx import utils
++from cinder.volume import utils as volutils
+ from cinder.zonemanager import utils as zm_utils
+ 
+ 
+@@ -366,3 +375,112 @@ class VNXDriver(driver.ManageableVD,
+ 
+     def get_replication_error_status(self, context, groups):
+         return self.adapter.get_replication_error_status(context, groups)
++
++# START Windriver code
++    def copy_volume_to_file(self, context, volume, dest_file):
++        """Copy the volume to the specified file."""
++        LOG.info('copy_volume_to_file %s.', volume['name'])
++
++        use_multipath = self.configuration.use_multipath_for_image_xfer
++        enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
++        properties = cinder_utils.brick_get_connector_properties(
++            use_multipath,
++            enforce_multipath)
++        attach_info, volume = self._attach_volume(context, volume, properties)
++
++        try:
++            # Use O_DIRECT to avoid thrashing the system buffer cache
++            extra_flags = []
++            if volutils.check_for_odirect_support(
++                    attach_info['device']['path'], dest_file, 'iflag=direct'):
++                extra_flags.append('iflag=direct')
++            if volutils.check_for_odirect_support(
++                    attach_info['device']['path'], dest_file, 'oflag=direct'):
++                extra_flags.append('oflag=direct')
++            conv = []
++            if not extra_flags:
++                conv.append('fdatasync')
++            if conv:
++                conv_options = 'conv=' + ",".join(conv)
++                extra_flags.append(conv_options)
++
++            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
++            blocksize = volutils._check_blocksize(
++                self.configuration.volume_dd_blocksize)
++
++            # Perform the copy
++            cmd = ['dd',
++                   'if=%s' % attach_info['device']['path'],
++                   'of=%s' % dest_file,
++                   'count=%d' % size_in_bytes,
++                   'bs=%s' % blocksize,
++                   'status=none']
++            cmd.extend(extra_flags)
++            self._execute(*cmd, run_as_root=True)
++        except Exception:
++            LOG.error("Failed to copy volume %(src)s to %(dest)s",
++                      {'src': volume['id'], 'dest': dest_file})
++            raise
++        finally:
++            self._detach_volume(context, attach_info, volume, properties)
++
++    def copy_file_to_volume(self, context, src_file, volume):
++        """Copies a file to a volume."""
++        LOG.info('copy_file_to_volume %s.', volume['name'])
++
++        try:
++            lun = self.cli._client.get_lun_by_name(volume['name'])
++        except Exception:
++            lun = None
++
++        if not lun:
++            # The underlying volume is gone. We need to re-create it.
++            self.create_volume(volume)
++            self.create_export(context, volume, connector=None)
++        # TODO(vutran):
++        # when our EMC supports snapshot, then should add else part here
++        # to make sure if this volume does not have any snapshot just
++        # like the function copy_file_to_volume() in lvm.py
++
++        use_multipath = self.configuration.use_multipath_for_image_xfer
++        enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
++        properties = cinder_utils.brick_get_connector_properties(
++            use_multipath,
++            enforce_multipath)
++        attach_info, volume = self._attach_volume(context, volume, properties)
++
++        try:
++            # Use O_DIRECT to avoid thrashing the system buffer cache
++            extra_flags = []
++            if volutils.check_for_odirect_support(
++                    src_file, attach_info['device']['path'], 'iflag=direct'):
++                extra_flags.append('iflag=direct')
++            if volutils.check_for_odirect_support(
++                    src_file, attach_info['device']['path'], 'oflag=direct'):
++                extra_flags.append('oflag=direct')
++            conv = []
++            if not extra_flags:
++                conv.append('fdatasync')
++            if conv:
++                conv_options = 'conv=' + ",".join(conv)
++                extra_flags.append(conv_options)
++
++            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
++            blocksize = volutils._check_blocksize(
++                self.configuration.volume_dd_blocksize)
++
++            # Perform the copy
++            cmd = ['dd',
++                   'if=%s' % src_file,
++                   'of=%s' % attach_info['device']['path'],
++                   'count=%d' % size_in_bytes,
++                   'bs=%s' % blocksize]
++            cmd.extend(extra_flags)
++            self._execute(*cmd, run_as_root=True)
++        except Exception:
++            LOG.error("Failed to copy %(src)s to volume %(dest)s",
++                      {'src': src_file, 'dest': volume['id']})
++            raise
++        finally:
++            self._detach_volume(context, attach_info, volume, properties)
++# END Windriver code
+-- 
+2.7.4
+

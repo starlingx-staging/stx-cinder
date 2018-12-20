@@ -1,0 +1,40 @@
+From 9626aa06b1513e7226bcd1a4430faf502a44eb36 Mon Sep 17 00:00:00 2001
+From: Stefan Dinescu <stefan.dinescu@windriver.com>
+Date: Mon, 6 Feb 2017 15:32:39 +0000
+Subject: [PATCH 18/53] Pike Rebase: Clear scheduler faults on successful
+ volume scheduling
+
+When multiple backends are present, a fault may be logged when one
+backend has insufficient space present even though it will subsequently
+be scheduled successfully to another backend.
+
+If a volume has been successfully scheduled to any backend, then clear
+any volume faults up to that point.
+
+(cherry picked from commit 8c3fb7e131bd53e37616893b8d94d0431a424614)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/scheduler/filter_scheduler.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/cinder/scheduler/filter_scheduler.py b/cinder/scheduler/filter_scheduler.py
+index ab8101c..41bdc07 100644
+--- a/cinder/scheduler/filter_scheduler.py
++++ b/cinder/scheduler/filter_scheduler.py
+@@ -105,6 +105,13 @@ class FilterScheduler(driver.Scheduler):
+         # context is not serializable
+         filter_properties.pop('context', None)
+ 
++        # In case of multiple cinder backends, it is possible for
++        # one backend to fail to schedule, while another succeeds.
++        # If the volume is scheduled successfully, clear any fault
++        # generated.
++        utils.update_volume_fault(
++            context, volume_id, "")
++
+         LOG.info(("Volume %(volume_id)s is scheduled to create. "
+                   "\n--request_spec: %(request_spec)s, "
+                   "\n--filter_properties: %(filter_properties)s, "
+-- 
+2.7.4
+

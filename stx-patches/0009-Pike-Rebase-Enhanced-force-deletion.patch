@@ -1,0 +1,186 @@
+From 36b578233e5e3b15ffe91996501117f1db02f8fa Mon Sep 17 00:00:00 2001
+From: Stefan Dinescu <stefan.dinescu@windriver.com>
+Date: Tue, 19 Jan 2016 16:04:38 +0200
+Subject: [PATCH 09/53] Pike Rebase: Enhanced force deletion
+
+In case of a failure in communication between nova and cinder,
+an instance can be deleted, but the attached volume is not properly
+marked as detached and cannot be deleted. This fix added a check to
+"force-delete" to check in nova or any existing attachements and if
+none exist, delete the volume.
+
+===
+
+Allow tenants to invoke force-delete
+
+When the HEAT code was changed to use force-delete on cinder volume
+deletion, this was blocking tenants. Now when a tenant invokes a force
+delete for a cinder volume (such as through heat) the
+"volume_extension:volume_admin_actions:force_delete" policy will no
+longer be checked, however the "volume:delete" policy is still
+authorized against.
+
+(cherry picked from commit 1c3e03284d8ff5ae356f70e5bc2e8f6fc9a8a725)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 1cf18990ce44d6b2c8b333ce3769ccddffa8dd0b)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/api/contrib/admin_actions.py     |  6 ++--
+ cinder/tests/unit/volume/test_volume.py | 28 ++++++++++++++++--
+ cinder/volume/api.py                    | 51 +++++++++++++++++++++++++++++++++
+ 3 files changed, 80 insertions(+), 5 deletions(-)
+
+diff --git a/cinder/api/contrib/admin_actions.py b/cinder/api/contrib/admin_actions.py
+index 4d9dfea..ec7e9be 100644
+--- a/cinder/api/contrib/admin_actions.py
++++ b/cinder/api/contrib/admin_actions.py
+@@ -130,9 +130,11 @@ class AdminController(wsgi.Controller):
+     def _force_delete(self, req, id, body):
+         """Delete a resource, bypassing the check that it must be available."""
+         context = req.environ['cinder.context']
+-        self.authorize(context, 'force_delete')
+         # Not found exception will be handled at the wsgi level
+-        resource = self._get(context, id)
++        try:
++            resource = self._get(context, id)
++        except exception.VolumeNotFound as e:
++            raise exc.HTTPNotFound(explanation=e.msg)
+         self._delete(context, resource, force=True)
+         return webob.Response(status_int=http_client.ACCEPTED)
+ 
+diff --git a/cinder/tests/unit/volume/test_volume.py b/cinder/tests/unit/volume/test_volume.py
+index 062d8ce..6341f95 100644
+--- a/cinder/tests/unit/volume/test_volume.py
++++ b/cinder/tests/unit/volume/test_volume.py
+@@ -40,6 +40,7 @@ from cinder.objects import fields
+ import cinder.policy
+ from cinder import quota
+ from cinder.tests import fake_driver
++from cinder.tests.unit.api import fakes
+ from cinder.tests.unit import conf_fixture
+ from cinder.tests.unit import fake_constants as fake
+ from cinder.tests.unit import fake_snapshot
+@@ -1795,19 +1796,40 @@ class VolumeTestCase(base.BaseVolumeTestCase):
+         # clean up
+         self.volume.delete_volume(self.context, volume)
+ 
+-    def test_cannot_force_delete_attached_volume(self):
+-        """Test volume can't be force delete in attached state."""
++    def test_cannot_force_delete_attached_volume_with_instance(self):
++        """Test volume can't be force deleted with attachment."""
+         volume = tests_utils.create_volume(self.context, CONF.host,
+                                            status='in-use',
+                                            attach_status=
+                                            fields.VolumeAttachStatus.ATTACHED)
++        fake_uuid = fakes.get_fake_uuid()
++        tests_utils.attach_volume(self.context, volume.id, fake_uuid,
++                                  'fake_host', '/dev/vda')
+ 
+-        self.assertRaises(exception.InvalidVolume,
++        self.assertRaises(exception.VolumeAttached,
+                           self.volume_api.delete,
+                           self.context,
+                           volume,
+                           force=True)
+ 
++        # clean up
++        db.volume_destroy(self.context, volume.id)
++
++    def test_force_delete_attached_volume_without_instance(self):
++        """Test volume can be deleted if attachment is no longer available."""
++        volume = tests_utils.create_volume(self.context, CONF.host,
++                                           status='in-use',
++                                           attach_status = 'attached')
++
++        # delete with force
++        self.volume_api.delete(self.context, volume, force=True)
++
++        # status is deleting
++        volume = objects.Volume.get_by_id(context.get_admin_context(),
++                                          volume.id)
++        self.assertEqual('deleting', volume.status)
++
++        # clean up
+         db.volume_destroy(self.context, volume.id)
+ 
+     def test__revert_to_snapshot_generic_failed(self):
+diff --git a/cinder/volume/api.py b/cinder/volume/api.py
+index 3ec4dbf..0a2a128 100644
+--- a/cinder/volume/api.py
++++ b/cinder/volume/api.py
+@@ -39,6 +39,7 @@ import six
+ 
+ from cinder.api import common
+ from cinder.common import constants
++from cinder.compute import nova
+ from cinder import context
+ from cinder import db
+ from cinder.db import base
+@@ -438,6 +439,17 @@ class API(base.Base):
+                                'id': volume.id})
+             return
+ 
++        if volume['attach_status'] == "attached":
++            # Volume is still attached, need to detach first
++            # In some cases, the nova instance is deleted, but the message
++            # doesn't reach cinder and the volume thinks it's still attached.
++            # In case of a force-delete, we call nova to check if the attached
++            # instance is actually present. As a safety measure, the deletion
++            # continues only if nova return that the instance is actually gone.
++            # For any other exception, we cancel the deletion.
++            if force:
++                self._force_delete_volume(context, volume)
++
+         if not unmanage_only:
+             volume.assert_not_frozen()
+ 
+@@ -545,6 +557,45 @@ class API(base.Base):
+         LOG.info("Delete volume request issued successfully.",
+                  resource=volume)
+ 
++    def _force_delete_volume(self, context, volume):
++        LOG.info(('Forcing volume deletion. Checking if the volume'
++                  'is still attached to nova instances.'))
++        attachments = volume['volume_attachment']
++        volume_has_instances = False
++        for attachment in attachments:
++            instance_uuid = attachment['instance_uuid']
++            try:
++                nova.API().get_server(context, instance_uuid)
++                volume_has_instances = True
++            except exception.ServerNotFound:
++                LOG.info(('Attached instance %s '
++                          'not found in nova.'),
++                         instance_uuid)
++            except exception.APITimeout:
++                volume_has_instances = True
++                LOG.error(('Nova API Timeout '
++                           'for instance %s.'),
++                          instance_uuid)
++            except Exception as e:
++                LOG.error(('Nova API exception. '
++                           'Exception type: %s'),
++                          type(e).__name__)
++                volume_has_instances = True
++        if volume_has_instances:
++            LOG.info(('Volume %s still has '
++                      'instances attached'),
++                     volume.id)
++            raise exception.VolumeAttached(volume_id=volume.id)
++        else:
++            LOG.info(('Volume %s has no more attachments. '
++                      'Deleting'),
++                     volume.id)
++            for attachment in attachments:
++                self.detach(context, volume, attachment.id)
++
++            volume.update({'attach_status': 'detached'})
++            volume.save()
++
+     @wrap_check_policy
+     def update(self, context, volume, fields):
+         # TODO(karthikp): Making sure volume is always oslo-versioned
+-- 
+2.7.4
+

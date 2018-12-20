@@ -1,0 +1,31 @@
+From 0a9bde4f44bd880489a73aefe59b3aa5f5b641c9 Mon Sep 17 00:00:00 2001
+From: Giao Le <giao.le@windriver.com>
+Date: Mon, 26 Oct 2015 12:31:38 -0400
+Subject: [PATCH 05/53] Pike Rebase: Cinder extensions authorization policy
+
+  - add authorization policy for WRS extensions:
+      1. volume_extension:snapshot_export_attributes
+      2. volume_extension:snapshot_backup_status_attribute
+
+(cherry picked from commit 5d33977be36331f1e31b43824c3bab988e341300)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ etc/cinder/policy.json | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/etc/cinder/policy.json b/etc/cinder/policy.json
+index c51f564..6f9d666 100644
+--- a/etc/cinder/policy.json
++++ b/etc/cinder/policy.json
+@@ -82,6 +82,8 @@
+     "volume_extension:volume_manage": "rule:admin_api",
+     "volume_extension:volume_unmanage": "rule:admin_api",
+     "volume_extension:list_manageable": "rule:admin_api",
++    "volume_extension:snapshot_export_attributes": "rule:admin_or_owner",
++    "volume_extension:snapshot_backup_status_attribute": "rule:admin_or_owner",
+ 
+     "volume_extension:capabilities": "rule:admin_api",
+ 
+-- 
+2.7.4
+

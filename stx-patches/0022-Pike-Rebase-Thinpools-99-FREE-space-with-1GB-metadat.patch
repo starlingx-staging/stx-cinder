@@ -1,0 +1,138 @@
+From 0e900e99c1c2387d25feb9ceecc29df7b36d5754 Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Thu, 18 May 2017 16:20:40 +0300
+Subject: [PATCH 22/53] Pike Rebase: Thinpools 99%FREE space with 1GB metadata
+
+Thinpools are now using 99% of free space in LVM VG and with 1GB metadata.
+
+Previous values were 95% and automatic metadata size based on thin volumes pool size. Sample sizes:
+
+controller-1:~# thin_metadata_size -b64k -s 60g -m 1000 -umdd
+thin_metadata_size - 34.38 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=60gibibytes --max-thins=1000"
+
+controller-1:~# thin_metadata_size -b64k -s 120g -m 1000 -um
+thin_metadata_size - 64.86 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=120gibibytes --max-thins=1000"
+
+controller-1:~# thin_metadata_size -b64k -s 256g -m 1000 -um
+thin_metadata_size - 133.94 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=256gibibytes --max-thins=1000"
+
+controller-1:~# thin_metadata_size -b64k -s 500g -m 1000 -um
+thin_metadata_size - 257.88 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=500gibibytes --max-thins=1000"
+
+controller-1:~# thin_metadata_size -b64k -s 1t -m 1000 -um
+thin_metadata_size - 524.04 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=1tebibytes --max-thins=1000"
+
+controller-1:~# thin_metadata_size -b64k -s 2t -m 2000 -um
+thin_metadata_size - 1048.07 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=2tebibytes --max-thins=2000"
+
+controller-1:~# thin_metadata_size -b64k -s 4t -m 4000 -um
+thin_metadata_size - 2096.14 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=4tebibytes --max-thins=4000"
+
+controller-1:~# thin_metadata_size -b64k -s 6t -m 6000 -um
+thin_metadata_size - 3144.20 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=6tebibytes --max-thins=6000"
+
+controller-1:~# thin_metadata_size -b64k -s 8t -m 8000 -um
+thin_metadata_size - 4192.27 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=8tebibytes --max-thins=8000"
+
+controller-1:~# thin_metadata_size -b64k -s 10t -m 10000 -um
+thin_metadata_size - 5240.34 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=10tebibytes --max-thins=10000"
+
+controller-1:~# thin_metadata_size -b64k -s 12t -m 12000 -um
+thin_metadata_size - 6288.40 mebibytes estimated metadata area size for "--block-size=64kibibytes --pool-size=12tebibytes --max-thins=12000"
+
+Autoresize of metadata will be done by RMON if the initial 1GB is not enough.
+
+---
+ cinder/brick/local_dev/lvm.py             | 27 +++++++++++++++++++--------
+ cinder/tests/unit/brick/test_brick_lvm.py | 13 ++++++++++---
+ 2 files changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/cinder/brick/local_dev/lvm.py b/cinder/brick/local_dev/lvm.py
+index 9236433..c2282da 100644
+--- a/cinder/brick/local_dev/lvm.py
++++ b/cinder/brick/local_dev/lvm.py
+@@ -516,15 +516,26 @@ class LVM(executor.Executor):
+ 
+         vg_pool_name = '%s/%s' % (self.vg_name, name)
+ 
++        # Leaving 5% is too much for large disks but using 100%
++        # is even worse as we have to leave space for metadata expansion and
++        # recovery (manual or automatic).
+         if not size_str:
+-            size_str = self._calculate_thin_pool_size()
+-
+-        cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-L', size_str,
+-                                    vg_pool_name]
+-        LOG.debug("Creating thin pool '%(pool)s' with size %(size)s of "
+-                  "total %(free)sg", {'pool': vg_pool_name,
+-                                      'size': size_str,
+-                                      'free': self.vg_free_space})
++            size_str = '+99%FREE'  # percent of VG free space to allocate
++            mda_size_str = '1G'
++            cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-l', size_str,
++                                        '--poolmetadatasize', mda_size_str,
++                                        vg_pool_name]
++        else:
++            mda_size_str = '(lvm autosized)'
++            cmd = LVM.LVM_CMD_PREFIX + ['lvcreate', '-T', '-L', size_str,
++                                        vg_pool_name]
++        LOG.info(("Creating thin pool '%(pool)s' using %(size)s of VG "
++                  "of which metadata size is %(meta)s from a "
++                  "total of %(free)sg"),
++                 {'pool': vg_pool_name,
++                  'size': size_str,
++                  'meta': mda_size_str,
++                  'free': self.vg_free_space})
+ 
+         self._execute(*cmd,
+                       root_helper=self._root_helper,
+diff --git a/cinder/tests/unit/brick/test_brick_lvm.py b/cinder/tests/unit/brick/test_brick_lvm.py
+index 10653a5..b44bab0 100644
+--- a/cinder/tests/unit/brick/test_brick_lvm.py
++++ b/cinder/tests/unit/brick/test_brick_lvm.py
+@@ -156,6 +156,8 @@ class BrickLvmTestCase(test.TestCase):
+                 data = "  9:12\n"
+         elif 'lvcreate, -T, -L, ' in cmd_string:
+             pass
++        elif 'lvcreate, -T, -l, ' in cmd_string:
++            pass
+         elif 'lvcreate, -T, -V, ' in cmd_string:
+             pass
+         elif 'lvcreate, -n, ' in cmd_string:
+@@ -309,7 +311,7 @@ class BrickLvmTestCase(test.TestCase):
+ 
+         # The size of fake-vg volume group is 10g, so the calculated thin
+         # pool size should be 9.5g (95% of 10g).
+-        self.assertEqual("9.5g", self.vg.create_thin_pool())
++        self.assertEqual("+99%FREE", self.vg.create_thin_pool())
+ 
+         # Passing a size parameter should result in a thin pool of that exact
+         # size.
+@@ -320,8 +322,12 @@ class BrickLvmTestCase(test.TestCase):
+         self.vg.vg_thin_pool = "test-prov-cap-pool-unit"
+         self.vg.vg_name = 'test-prov-cap-vg-unit'
+         self.assertEqual(
+-            "9.5g",
++            "+99%FREE",
+             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
++        self.vg.update_volume_group_info()
++        # This only validates that update_volume_group_info()
++        # works so is safe to keep the values as before even though we now
++        # have +99%FREE instead of 95%.
+         self.assertEqual("9.50", self.vg.vg_thin_pool_size)
+         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
+         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)
+@@ -329,8 +335,9 @@ class BrickLvmTestCase(test.TestCase):
+         self.vg.vg_thin_pool = "test-prov-cap-pool-no-unit"
+         self.vg.vg_name = 'test-prov-cap-vg-no-unit'
+         self.assertEqual(
+-            "9.5g",
++            "+99%FREE",
+             self.vg.create_thin_pool(name=self.vg.vg_thin_pool))
++        self.vg.update_volume_group_info()
+         self.assertEqual("9.50", self.vg.vg_thin_pool_size)
+         self.assertEqual(7.6, self.vg.vg_thin_pool_free_space)
+         self.assertEqual(3.0, self.vg.vg_provisioned_capacity)
+-- 
+2.7.4
+

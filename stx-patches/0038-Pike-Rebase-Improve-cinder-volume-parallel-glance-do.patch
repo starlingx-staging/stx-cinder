@@ -1,0 +1,159 @@
+From da1081d3053303e3a9bb540920dab5b84c62073f Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Tue, 12 Dec 2017 12:36:13 +0000
+Subject: [PATCH 38/53] Pike Rebase: Improve cinder-volume parallel glance
+ downloads impact to system - Unit Test
+
+---
+ cinder/tests/unit/image/test_glance.py             | 84 ++++++++++++++++++++++
+ .../tests/unit/volume/drivers/test_lvm_driver.py   | 25 +++++++
+ 2 files changed, 109 insertions(+)
+
+diff --git a/cinder/tests/unit/image/test_glance.py b/cinder/tests/unit/image/test_glance.py
+index e987b42..f7c0987 100644
+--- a/cinder/tests/unit/image/test_glance.py
++++ b/cinder/tests/unit/image/test_glance.py
+@@ -21,6 +21,7 @@ import ddt
+ import glanceclient.exc
+ import mock
+ from oslo_config import cfg
++from oslo_utils import units
+ 
+ from cinder import context
+ from cinder import exception
+@@ -41,6 +42,9 @@ class NullWriter(object):
+     def fileno(self, *arg, **kwargs):
+         return 11
+ 
++    def flush(self):
++        pass
++
+ 
+ class TestGlanceSerializer(test.TestCase):
+     def test_serialize(self):
+@@ -560,6 +564,86 @@ class TestGlanceImageService(test.TestCase):
+         self.flags(glance_num_retries=1)
+         service.download(self.context, image_id, writer)
+ 
++    def test_nicer_download(self):
++
++        class MyGlanceStubClient(glance_stubs.StubGlanceClient):
++
++            def __init__(self, images=None, chunk_size=0):
++                self.chunk_size = chunk_size
++                super(MyGlanceStubClient, self).__init__(images)
++
++            def data(self, image_id):
++                image_size = getattr(self.get(image_id), 'size', 0)
++                result = []
++                if not self.chunk_size:
++                    chunk_size = image_size
++                else:
++                    chunk_size = self.chunk_size
++                while image_size > 0:
++                    result.append('*' * min(image_size, chunk_size))
++                    image_size -= chunk_size
++                return result
++
++        chunk_count = 4
++        chunk_size = 1 * units.Mi
++        self.override_config('glance_download_fdatasync_interval_mib',
++                             chunk_size / units.Mi * 2)
++        client = MyGlanceStubClient(chunk_size=chunk_size)
++        fixture = self._make_fixture(
++            name='image10', is_public=True,
++            size=chunk_size * chunk_count)
++        service = self._create_image_service(client)
++        image_id = service.create(self.context, fixture)['id']
++        writer = NullWriter()
++        with mock.patch('time.sleep') as mock_sleep, \
++                mock.patch('os.fdatasync') as mock_fdatasync, \
++                mock.patch.object(writer, 'write') as mock_write, \
++                mock.patch.object(writer, 'flush') as mock_flush:
++            service.download(self.context, image_id, writer)
++            self.assertEqual(mock_sleep.call_count, chunk_count)
++            self.assertEqual(mock_write.call_count, chunk_count)
++            self.assertEqual(mock_flush.call_count, chunk_count / 2)
++            self.assertEqual(mock_fdatasync.call_count, chunk_count / 2)
++
++    def test_nicer_download_no_fdatasync(self):
++
++        class MyGlanceStubClient(glance_stubs.StubGlanceClient):
++            def __init__(self, images=None, chunk_size=0):
++                self.chunk_size = chunk_size
++                super(MyGlanceStubClient, self).__init__(images)
++
++            def data(self, image_id):
++                image_size = getattr(self.get(image_id), 'size', 0)
++                result = []
++                if not self.chunk_size:
++                    chunk_size = image_size
++                else:
++                    chunk_size = self.chunk_size
++                while image_size > 0:
++                    result.append('*' * min(image_size, chunk_size))
++                    image_size -= chunk_size
++                return result
++
++        chunk_count = 4
++        chunk_size = units.Mi
++        self.override_config('glance_download_fdatasync_interval_mib', 0)
++        client = MyGlanceStubClient(chunk_size=chunk_size)
++        fixture = self._make_fixture(
++            name='image10', is_public=True,
++            size=chunk_size * chunk_count)
++        service = self._create_image_service(client)
++        image_id = service.create(self.context, fixture)['id']
++        writer = NullWriter()
++        with mock.patch('time.sleep') as mock_sleep, \
++                mock.patch('os.fdatasync') as mock_fdatasync, \
++                mock.patch.object(writer, 'write') as mock_write, \
++                mock.patch.object(writer, 'flush') as mock_flush:
++            service.download(self.context, image_id, writer)
++            self.assertEqual(mock_sleep.call_count, chunk_count)
++            self.assertEqual(mock_write.call_count, chunk_count)
++            mock_flush.assert_not_called()
++            mock_fdatasync.assert_not_called()
++
+     def test_client_forbidden_converts_to_imagenotauthed(self):
+         class MyGlanceStubClient(glance_stubs.StubGlanceClient):
+             """A client that raises a Forbidden exception."""
+diff --git a/cinder/tests/unit/volume/drivers/test_lvm_driver.py b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+index b5a7cca..19a455d 100644
+--- a/cinder/tests/unit/volume/drivers/test_lvm_driver.py
++++ b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+@@ -896,6 +896,31 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+         self.assertEqual(expected_value,
+                          lvm_driver.configuration.max_over_subscription_ratio)
+ 
++    def test_do_setup_clean_temporary_dir(self):
++        vg_obj = fake_lvm.FakeBrickLVM('cinder-volumes',
++                                       False,
++                                       None,
++                                       'default')
++        self.configuration.volume_clear = 'zero'
++        self.configuration.volume_clear_size = 0
++        self.configuration.lvm_type = 'thin'
++        self.configuration.iscsi_helper = 'tgtadm'
++        lvm_driver = lvm.LVMVolumeDriver(configuration=self.configuration,
++                                         vg_obj=vg_obj, db=db)
++        tmp_files = ['tmpFileA', 'tmpFileB']
++        with mock.patch('os.path.exists', return_value=True) \
++                as mock_path_exists, \
++                mock.patch('os.listdir', return_value=tmp_files), \
++                mock.patch('os.remove') as mock_remove:
++            lvm_driver.do_setup('context')
++            mock_path_exists.assert_called_once_with(
++                CONF.image_conversion_dir)
++            self.assertEqual(mock_remove.call_count, len(tmp_files))
++            calls = [args for args, kwargs in mock_remove.call_args_list]
++            for f in tmp_files:
++                self.assertIn((os.path.join(CONF.image_conversion_dir, f),),
++                              calls)
++
+ 
+ class LVMISCSITestCase(test_driver.BaseDriverTestCase):
+     """Test Case for LVMISCSIDriver"""
+-- 
+2.7.4
+

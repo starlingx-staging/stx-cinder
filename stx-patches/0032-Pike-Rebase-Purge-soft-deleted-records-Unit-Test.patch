@@ -1,0 +1,40 @@
+From 9f7e07fb12af6eb217ccd35fa1204eaaaee66f9f Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Fri, 8 Dec 2017 14:36:51 +0000
+Subject: [PATCH 32/53] Pike Rebase: Purge soft deleted records - Unit Test
+
+---
+ cinder/tests/unit/test_cmd.py | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/cinder/tests/unit/test_cmd.py b/cinder/tests/unit/test_cmd.py
+index 6a72aa7..02c3956 100644
+--- a/cinder/tests/unit/test_cmd.py
++++ b/cinder/tests/unit/test_cmd.py
+@@ -317,6 +317,23 @@ class TestCinderManageCmd(test.TestCase):
+ 
+     @mock.patch('cinder.db.sqlalchemy.api.purge_deleted_rows')
+     @mock.patch('cinder.context.get_admin_context')
++    def test_purge_with_zero_age(self, get_admin_context,
++                                 purge_deleted_rows):
++        ctxt = context.RequestContext(fake.USER_ID, fake.PROJECT_ID,
++                                      is_admin=True)
++        get_admin_context.return_value = ctxt
++
++        purge_deleted_rows.return_value = None
++
++        db_cmds = cinder_manage.DbCommands()
++        db_cmds.purge(0)
++
++        get_admin_context.assert_called_once_with()
++        purge_deleted_rows.assert_called_once_with(
++            ctxt, age_in_days=0)
++
++    @mock.patch('cinder.db.sqlalchemy.api.purge_deleted_rows')
++    @mock.patch('cinder.context.get_admin_context')
+     def test_purge_less_than_age_in_days_limit(self, get_admin_context,
+                                                purge_deleted_rows):
+         age_in_days = int(time.time() / 86400) - 1
+-- 
+2.7.4
+

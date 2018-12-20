@@ -1,0 +1,77 @@
+From d9555cc2f9944e7fb185cf2200267d159b2fc200 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Mon, 13 Nov 2017 17:47:45 +0200
+Subject: [PATCH 26/53] Pike Rebase: Fix uploading cinder volumes to images
+
+Initial Pike rebase "Fix uploading cinder volumes to images"
+commit fails to get len(data) for data of type "file" and
+updates unknown "image_size" glance image metadata which
+causes a failure on glance side.
+---
+ cinder/image/glance.py                 | 20 ++++++++++++++++++--
+ cinder/tests/unit/image/test_glance.py |  2 +-
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/cinder/image/glance.py b/cinder/image/glance.py
+index 9089552..6687f88 100644
+--- a/cinder/image/glance.py
++++ b/cinder/image/glance.py
+@@ -40,6 +40,14 @@ from six.moves import urllib
+ from cinder import exception
+ from cinder.i18n import _
+ 
++# see https://stackoverflow.com/questions/36320953
++import io
++try:
++    file_types = (file, io.IOBase)
++
++except NameError:
++    file_types = (io.IOBase,)
++
+ 
+ glance_opts = [
+     cfg.ListOpt('allowed_direct_url_schemes',
+@@ -416,9 +424,17 @@ class GlanceImageService(object):
+         try:
+             # NOTE(dosaboy): the v2 api separates update from upload
+             if CONF.glance_api_version > 1:
++                size = 0
+                 if data:
++                    if isinstance(data, file_types):
++                        old_fp = data.tell()
++                        data.seek(0, os.SEEK_END)
++                        size = data.tell()
++                        data.seek(old_fp, os.SEEK_SET)
++                    else:
++                        size = len(data)
+                     self._client.call(context, 'upload', image_id, data,
+-                                      len(data))
++                                      size)
+                 if image_meta:
+                     if purge_props:
+                         # Properties to remove are those not specified in
+@@ -431,7 +447,7 @@ class GlanceImageService(object):
+                     image_meta = self._client.call(
+                         context, 'update', image_id,
+                         **dict(image_meta,
+-                               image_size=image_meta.get('size', 0)))
++                               size=image_meta.get('size', size)))
+                 else:
+                     image_meta = self._client.call(context, 'get', image_id)
+             else:
+diff --git a/cinder/tests/unit/image/test_glance.py b/cinder/tests/unit/image/test_glance.py
+index 3fbbb42..e987b42 100644
+--- a/cinder/tests/unit/image/test_glance.py
++++ b/cinder/tests/unit/image/test_glance.py
+@@ -425,7 +425,7 @@ class TestGlanceImageService(test.TestCase):
+         if ver == 2:
+             client.call.assert_called_once_with(
+                 self.context, 'update', image_id, k1='v1', remove_props=['k2'],
+-                image_size = 0)
++                size=0)
+         else:
+             client.call.assert_called_once_with(
+                 self.context, 'update', image_id, properties={'k1': 'v1'},
+-- 
+2.7.4
+

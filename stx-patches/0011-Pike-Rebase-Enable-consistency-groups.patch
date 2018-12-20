@@ -1,0 +1,52 @@
+From f763c8c7b629fd4d29d6f2ba3e8c4ca117718eeb Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Tue, 26 Jul 2016 18:52:48 +0300
+Subject: [PATCH 11/53] Pike Rebase: Enable consistency groups
+
+Volumes can be assigned to consistency groups to ensure that snapshots
+of all volumes in the group are taken at the same point in time.
+Therefore everyone should benefit from them.
+
+Based on description at:
+http://docs.openstack.org/admin-guide/blockstorage-consistency-groups.html
+
+(cherry picked from commit 217ac4d6f696ee1ebeb2725ff2018fe99f180289)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ etc/cinder/policy.json | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/etc/cinder/policy.json b/etc/cinder/policy.json
+index 6f9d666..8f72469 100644
+--- a/etc/cinder/policy.json
++++ b/etc/cinder/policy.json
+@@ -116,16 +116,16 @@
+     "snapshot_extension:snapshot_unmanage": "rule:admin_api",
+     "snapshot_extension:list_manageable": "rule:admin_api",
+ 
+-    "consistencygroup:create" : "group:nobody",
+-    "consistencygroup:delete": "group:nobody",
+-    "consistencygroup:update": "group:nobody",
+-    "consistencygroup:get": "group:nobody",
+-    "consistencygroup:get_all": "group:nobody",
+-
+-    "consistencygroup:create_cgsnapshot" : "group:nobody",
+-    "consistencygroup:delete_cgsnapshot": "group:nobody",
+-    "consistencygroup:get_cgsnapshot": "group:nobody",
+-    "consistencygroup:get_all_cgsnapshots": "group:nobody",
++    "consistencygroup:create" : "",
++    "consistencygroup:delete": "",
++    "consistencygroup:update": "",
++    "consistencygroup:get": "",
++    "consistencygroup:get_all": "",
++
++    "consistencygroup:create_cgsnapshot" : "",
++    "consistencygroup:delete_cgsnapshot": "",
++    "consistencygroup:get_cgsnapshot": "",
++    "consistencygroup:get_all_cgsnapshots": "",
+ 
+     "group:group_types_manage": "rule:admin_api",
+     "group:group_types_specs": "rule:admin_api",
+-- 
+2.7.4
+

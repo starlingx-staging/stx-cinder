@@ -1,0 +1,81 @@
+From 792f7d37f48e7efef939d617ddc9f56d482add13 Mon Sep 17 00:00:00 2001
+From: Jerry Sun <jerry.sun@windriver.com>
+Date: Fri, 26 Jan 2018 15:24:47 -0500
+Subject: [PATCH 44/53] Changes to Titanium's handling Cinder
+ Extensions
+
+Added wrs-header to cinder client requests
+Cinder responds with wrs-fields only when wrs-header is present in requests
+---
+ cinder/api/contrib/snapshot_export_action.py | 18 ++++++++++--------
+ cinder/api/contrib/volume_export.py          | 19 +++++++++++--------
+ 2 files changed, 21 insertions(+), 16 deletions(-)
+
+diff --git a/cinder/api/contrib/snapshot_export_action.py b/cinder/api/contrib/snapshot_export_action.py
+index d32384c..56f65d1 100644
+--- a/cinder/api/contrib/snapshot_export_action.py
++++ b/cinder/api/contrib/snapshot_export_action.py
+@@ -97,17 +97,19 @@ class SnapshotExportActionsController(wsgi.Controller):
+ 
+     @wsgi.extends
+     def show(self, req, resp_obj, id):
+-        context = req.environ['cinder.context']
+-        if authorize(context):
+-            snapshot = resp_obj.obj['snapshot']
+-            self._export_snapshot(req, snapshot)
++        if req.headers.get('wrs-header') is not None:
++            context = req.environ['cinder.context']
++            if authorize(context):
++                snapshot = resp_obj.obj['snapshot']
++                self._export_snapshot(req, snapshot)
+ 
+     @wsgi.extends
+     def detail(self, req, resp_obj):
+-        context = req.environ['cinder.context']
+-        if authorize(context):
+-            for snapshot in list(resp_obj.obj['snapshots']):
+-                self._export_snapshot(req, snapshot)
++        if req.headers.get('wrs-header') is not None:
++            context = req.environ['cinder.context']
++            if authorize(context):
++                for snapshot in list(resp_obj.obj['snapshots']):
++                    self._export_snapshot(req, snapshot)
+ 
+ 
+ class Snapshot_export_action(extensions.ExtensionDescriptor):
+diff --git a/cinder/api/contrib/volume_export.py b/cinder/api/contrib/volume_export.py
+index f2a8e91..07021e4 100644
+--- a/cinder/api/contrib/volume_export.py
++++ b/cinder/api/contrib/volume_export.py
+@@ -120,17 +120,20 @@ class VolumeExportController(wsgi.Controller):
+ 
+     @wsgi.extends
+     def show(self, req, resp_obj, id):
+-        context = req.environ['cinder.context']
+-        if authorize(context):
+-            self._add_volume_backup_status_attribute(context,
+-                                                     resp_obj.obj['volume'])
++        if req.headers.get('wrs-header') is not None:
++            context = req.environ['cinder.context']
++            if authorize(context):
++                self._add_volume_backup_status_attribute(context,
++                                                         resp_obj
++                                                         .obj['volume'])
+ 
+     @wsgi.extends
+     def detail(self, req, resp_obj):
+-        context = req.environ['cinder.context']
+-        if authorize(context):
+-            for vol in list(resp_obj.obj['volumes']):
+-                self._add_volume_backup_status_attribute(context, vol)
++        if req.headers.get('wrs-header') is not None:
++            context = req.environ['cinder.context']
++            if authorize(context):
++                for vol in list(resp_obj.obj['volumes']):
++                    self._add_volume_backup_status_attribute(context, vol)
+ 
+ 
+ class Volume_export(extensions.ExtensionDescriptor):
+-- 
+2.7.4
+

@@ -1,0 +1,56 @@
+From d7506103abd50cb8f5e20b4d893e99e31578605b Mon Sep 17 00:00:00 2001
+From: Kristine Bujold <kristine.bujold@windriver.com>
+Date: Tue, 6 Mar 2018 13:18:35 -0500
+Subject: [PATCH 49/53] Creating volume from private image fails in Horizon
+
+   - Fix error reporting in cinder create volume functions
+---
+ cinder/volume/flows/manager/create_volume.py | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/cinder/volume/flows/manager/create_volume.py b/cinder/volume/flows/manager/create_volume.py
+index 1cd54b4..b0a7e7d 100644
+--- a/cinder/volume/flows/manager/create_volume.py
++++ b/cinder/volume/flows/manager/create_volume.py
+@@ -568,7 +568,8 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+                         'error': ex.stderr,
+                         'image_id': image_id}
+             LOG.error(errmsg, msg_args)
+-            volume_utils.update_volume_fault(context, volume.id, errmsg,
++            volume_utils.update_volume_fault(context, volume.id,
++                                             (errmsg % msg_args),
+                                              sys.exc_info())
+             raise exception.ImageCopyFailure(reason=ex.stderr)
+         except exception.ImageUnacceptable as ex:
+@@ -577,7 +578,8 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+             msg_args = {'volume_id': volume.id,
+                         'error': ex}
+             LOG.error(errmsg, msg_args)
+-            volume_utils.update_volume_fault(context, volume.id, errmsg,
++            volume_utils.update_volume_fault(context, volume.id,
++                                             (errmsg % msg_args),
+                                              sys.exc_info())
+             raise exception.ImageUnacceptable(ex)
+         except exception.ImageTooBig as ex:
+@@ -591,7 +593,8 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+             msg_args = {'volume_id': volume.id, 'error': ex,
+                         'image_id': image_id}
+             LOG.error(errmsg, msg_args)
+-            volume_utils.update_volume_fault(context, volume.id, errmsg,
++            volume_utils.update_volume_fault(context, volume.id,
++                                             (errmsg % msg_args),
+                                              sys.exc_info())
+             if not isinstance(ex, exception.ImageCopyFailure):
+                 raise exception.ImageCopyFailure(reason=ex)
+@@ -959,7 +962,7 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+                 volume_utils.update_volume_fault(
+                     context,
+                     volume.id,
+-                    errmsg,
++                    (errmsg % msg_args),
+                     sys.exc_info())
+                 raise
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,112 @@
+From 2db603a70885823413440c627cace7e3662d0a14 Mon Sep 17 00:00:00 2001
+From: Robert Church <robert.church@windriver.com>
+Date: Tue, 26 Jan 2016 13:31:27 -0600
+Subject: [PATCH 08/53] Pike Rebase: LVM thin provisioning allocation checks
+
+Fix LVM thin provisioning allocation checks for snapshots
+
+This commit will make sure that we can't over allocate the LVM thin pool
+when creating volumes or snapshots
+
+- Fix the capacity filter to make sure that the thin provisioning
+  allocation checks are used if the max_over_subscription_ratio is set
+  to 1.0.
+- Add a new exception, ThinPoolCapacityError, to be raised when the a
+  pool over allocation is attempted
+- Add a check when creating snapshots that will make sure that we do not
+  over allocate the thin pool. This check is similar to the check used
+  when creating volumes in the CapacityFilter.
+
+===
+
+Raise capacity error on volume creation
+
+Small footprint: rmon does not calculate the cinder volume totals
+properly and therefore does not raise appropriate alarms. Error details
+are now present if the creation of a volume from another volume fails
+because of insufficient space. The ThinPoolCapacityError is caught.
+
+(cherry picked from commit b7742a8b380cfbf564fcf5569b054bb08394c2ff)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 1d658e9ae539861a137d7b0462b0cf3a5793399e)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/exception.py          |  8 ++++++++
+ cinder/volume/drivers/lvm.py | 17 +++++++++++++++++
+ cinder/volume/manager.py     |  8 ++++++++
+ 3 files changed, 33 insertions(+)
+
+diff --git a/cinder/exception.py b/cinder/exception.py
+index 175b8c5..c5fe32c 100644
+--- a/cinder/exception.py
++++ b/cinder/exception.py
+@@ -1442,3 +1442,11 @@ class LVMBackingStoreIsBusy(CinderException):
+     message = _("The LVM backing store "
+                 "%(backing_vol)s is still used by: "
+                 "%(procs)s.")
++
++
++class LVMThinPoolCapacityError(CinderException):
++    message = _("Insufficient free space for thin provisioning. "
++                "The ratio of provisioned capacity over total capacity "
++                "%(provisioned_ratio).2f has exceeded the maximum over "
++                "subscription ratio %(oversub_ratio).2f on host "
++                "%(host)s.")
+diff --git a/cinder/volume/drivers/lvm.py b/cinder/volume/drivers/lvm.py
+index f8ebbf4..243d647 100644
+--- a/cinder/volume/drivers/lvm.py
++++ b/cinder/volume/drivers/lvm.py
+@@ -471,6 +471,23 @@ class LVMVolumeDriver(driver.VolumeDriver):
+     def create_snapshot(self, snapshot):
+         """Creates a snapshot."""
+ 
++        # TODO(WRS): The following check is targeted at thin pools to ensure
++        # that we don't over allocate when creating a snapshot. We need to
++        # extend this logic for thick pool allocation and add unit tests.
++        if (self.configuration.lvm_type == 'thin' and
++                self.configuration.max_over_subscription_ratio >= 1):
++            source_lvref = self.vg.get_volume(snapshot['volume_name'])
++            volume_size_gb = float(source_lvref['size'])
++            provisioned_ratio = ((self.vg.vg_provisioned_capacity +
++                                  volume_size_gb) / self.vg.vg_size)
++            if (provisioned_ratio >
++                    self.configuration.max_over_subscription_ratio):
++                ratio = self.configuration.max_over_subscription_ratio
++                raise exception.LVMThinPoolCapacityError(
++                    provisioned_ratio=provisioned_ratio,
++                    oversub_ratio=ratio,
++                    host=self.hostname)
++
+         self.vg.create_lv_snapshot(self._escape_snapshot(snapshot['name']),
+                                    snapshot['volume_name'],
+                                    self.configuration.lvm_type)
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index 3b56e42..63ee6cb 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -44,6 +44,7 @@ intact.
+ 
+ import os.path
+ import requests
++import sys
+ import time
+ 
+ from oslo_config import cfg
+@@ -682,6 +683,13 @@ class VolumeManager(manager.CleanableManager,
+             else:
+                 with coordination.COORDINATOR.get_lock(locked_action):
+                     _run_flow()
++        except exception.LVMThinPoolCapacityError as e:
++            if hasattr(e, 'rescheduled'):
++                rescheduled = e.rescheduled
++            errmsg = _('%s') % e
++            vol_utils.update_volume_fault(context, volume.id, errmsg,
++                                          sys.exc_info())
++            raise
+         finally:
+             try:
+                 flow_engine.storage.fetch('refreshed')
+-- 
+2.7.4
+

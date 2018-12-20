@@ -1,0 +1,144 @@
+From a3d6804be65890f80560123dc53f4a46fa09190a Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Wed, 23 Dec 2015 14:48:36 +0200
+Subject: [PATCH 06/53] Pike Rebase: Use glance image caching feature
+
+Add capability to use glance image caching feature
+
+When creating a volume using the Ceph backend and if an image is cached
+then cinder will use the RAW cache instead of the original image.
+
+===
+
+Remove volume_image_metadata added by Glance RAW Caching
+
+This info is used internally by Glance/Cinder and is not needed once
+a volume is created, nor does it provide any valuable information to
+the user.
+
+Before this, when an image was created from a volume or instance
+this metadata was copied over to the new image and could create confusion
+for Glance as it does not expect it to be present (e.g. on image delete).
+
+This reinstates default behavior in regards to metadata.
+
+(cherry picked from commit 1cb993de90059098ebcecff637f81ab0d31a7b1f)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit d7611da22acd9c37bf660292421a19294f09bd93)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/tests/unit/volume/drivers/test_rbd.py | 43 ++++++++++++++++++++++++++--
+ cinder/volume/drivers/rbd.py                 | 24 ++++++++++++++++
+ 2 files changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/cinder/tests/unit/volume/drivers/test_rbd.py b/cinder/tests/unit/volume/drivers/test_rbd.py
+index 1bee2c2..0cd1025 100644
+--- a/cinder/tests/unit/volume/drivers/test_rbd.py
++++ b/cinder/tests/unit/volume/drivers/test_rbd.py
+@@ -2049,7 +2049,7 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
+                          [{'url': 'rbd://bee/bi/bo/bum'},
+                           {'url': 'rbd://fee/fi/fo/fum'}])
+             volume = {'name': 'vol1'}
+-            image_meta = mock.sentinel.image_meta
++            image_meta = {}
+             image_service = mock.sentinel.image_service
+ 
+             actual = driver.clone_image(self.context,
+@@ -2080,7 +2080,7 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
+                           {'url': 'rbd://fee/fi/fo/fum'}])
+ 
+             volume = {'name': 'vol1'}
+-            image_meta = mock.sentinel.image_meta
++            image_meta = {}
+             image_service = mock.sentinel.image_service
+             actual = driver.clone_image(self.context,
+                                         volume,
+@@ -2096,3 +2096,42 @@ class ManagedRBDTestCase(test_driver.BaseDriverTestCase):
+                                               image_meta)
+             self.assertFalse(mock_clone.called)
+             self.assertFalse(mock_resize.called)
++
++    def test_clone_multilocation_with_raw_cache(self):
++        expected = ({'provider_location': None}, True)
++        driver = self.volume.driver
++
++        def cloneable_side_effect(url_location, image_meta):
++            return url_location == 'rbd://mee/mi/mo/mum'
++
++        with mock.patch.object(self.volume.driver, '_is_cloneable') \
++            as mock_is_cloneable, \
++            mock.patch.object(self.volume.driver, '_clone') as mock_clone, \
++            mock.patch.object(self.volume.driver, '_resize') \
++                as mock_resize:
++            mock_is_cloneable.side_effect = cloneable_side_effect
++            mock_clone.return_value = {}
++            image_loc = ('rbd://bee/bi/bo/bum',
++                         [{'url': 'rbd://bee/bi/bo/bum'},
++                          {'url': 'rbd://fee/fi/fo/fum'}])
++            volume = {'name': 'vol1'}
++            image_meta = {'properties': {
++                'cache_raw': 'True',
++                'cache_raw_status': 'Cached',
++                'cache_raw_url': 'rbd://mee/mi/mo/mum'}
++            }
++            image_service = mock.sentinel.image_service
++
++            actual = driver.clone_image(self.context,
++                                        volume,
++                                        image_loc,
++                                        image_meta,
++                                        image_service)
++
++            self.assertEqual(expected, actual)
++            self.assertEqual(1, mock_is_cloneable.call_count)
++            mock_clone.assert_called_once_with(volume,
++                                               'mi', 'mo', 'mum')
++            mock_is_cloneable.assert_called_with('rbd://mee/mi/mo/mum',
++                                                 image_meta)
++            mock_resize.assert_called_once_with(volume)
+diff --git a/cinder/volume/drivers/rbd.py b/cinder/volume/drivers/rbd.py
+index 14faf53..5474781 100644
+--- a/cinder/volume/drivers/rbd.py
++++ b/cinder/volume/drivers/rbd.py
+@@ -1201,6 +1201,14 @@ class RBDDriver(driver.CloneableImageVD,
+                       dict(loc=image_location, err=e))
+             return False
+ 
++    def _get_cached_location(self, image_meta):
++        """Extract the url provided by Glance RAW caching if present"""
++        properties = image_meta.get('properties')
++        if (properties and properties.get('cache_raw', '') == 'True' and
++                properties.get('cache_raw_status', '') == 'Cached'):
++            return properties.get('cache_raw_url')
++        return None
++
+     def clone_image(self, context, volume,
+                     image_location, image_meta,
+                     image_service):
+@@ -1215,6 +1223,22 @@ class RBDDriver(driver.CloneableImageVD,
+             else:
+                 url_locations = [image_location[0]]
+ 
++            # Use RAW cache if available (US68056)
++            cached_location = self._get_cached_location(image_meta)
++            if cached_location:
++                url_locations = [cached_location]
++                # The cached image is raw, update meta
++                image_meta['disk_format'] = 'raw'
++                # Remove raw caching related metadata as it can lead
++                # to confusions with images created from volumes, snapshots
++                # or instances.
++                try:
++                    for k in ['cache_raw', 'cache_raw_status',
++                              'cache_raw_url', 'cache_raw_size']:
++                        del image_meta['properties'][k]
++                except KeyError:
++                    pass
++
+             # iterate all locations to look for a cloneable one.
+             for url_location in url_locations:
+                 if url_location and self._is_cloneable(
+-- 
+2.7.4
+
