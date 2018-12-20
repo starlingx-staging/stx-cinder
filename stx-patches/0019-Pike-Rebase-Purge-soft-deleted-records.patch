@@ -1,0 +1,53 @@
+From 0cca437f59fad1369a742c9a7d1686d6108206e6 Mon Sep 17 00:00:00 2001
+From: Tee Ngo <tee.ngo@windriver.com>
+Date: Wed, 29 Mar 2017 16:55:10 -0400
+Subject: [PATCH 19/53] Pike Rebase: Purge soft deleted records
+
+Purge soft deleted records
+
+- Allow the option to purge all soft deleted records.
+- Ensure Cinder tables are purged in order to avoid FK constraint violation.
+
+---
+ cinder/cmd/manage.py          | 4 ++--
+ cinder/tests/unit/test_cmd.py | 2 ++
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/cinder/cmd/manage.py b/cinder/cmd/manage.py
+index f4ec90a..e3a8255 100644
+--- a/cinder/cmd/manage.py
++++ b/cinder/cmd/manage.py
+@@ -235,8 +235,8 @@ class DbCommands(object):
+     def purge(self, age_in_days):
+         """Purge deleted rows older than a given age from cinder tables."""
+         age_in_days = int(age_in_days)
+-        if age_in_days <= 0:
+-            print(_("Must supply a positive, non-zero value for age"))
++        if age_in_days < 0:
++            print(_("Must supply a positive value for age"))
+             sys.exit(1)
+         if age_in_days >= (int(time.time()) / 86400):
+             print(_("Maximum age is count of days since epoch."))
+diff --git a/cinder/tests/unit/test_cmd.py b/cinder/tests/unit/test_cmd.py
+index f6e9b1b..6a72aa7 100644
+--- a/cinder/tests/unit/test_cmd.py
++++ b/cinder/tests/unit/test_cmd.py
+@@ -23,6 +23,7 @@ from oslo_db import exception as oslo_exception
+ from oslo_utils import timeutils
+ import six
+ from six.moves import StringIO
++import unittest
+ 
+ try:
+     import rtslib_fb
+@@ -301,6 +302,7 @@ class TestCinderManageCmd(test.TestCase):
+             version_cmds.__call__()
+             version_string.assert_called_once_with()
+ 
++    @unittest.skip("purge all option is allowed")
+     def test_purge_age_in_days_value_equal_to_zero(self):
+         age_in_days = 0
+         self._test_purge_invalid_age_in_days(age_in_days)
+-- 
+2.7.4
+

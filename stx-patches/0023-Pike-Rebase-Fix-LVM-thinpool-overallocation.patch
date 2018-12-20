@@ -1,0 +1,220 @@
+From 5e61f1404a6c48f3488945ccb946426edfcbcff0 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Tue, 23 May 2017 15:20:56 +0300
+Subject: [PATCH 23/53] Pike Rebase: Fix LVM thinpool overallocation
+
+lvm thinpool overallocation
+
+cinder-scheduler provisioned capacity is overwritten with
+stale data when loading capabilities reported by cinder-volume
+
+Added timestamp field to prevent usage of old provisioned
+capacity data.
+
+===
+
+The alarm reported is correct: the storage is over-allocated.
+
+Although cinder storage is configured to 20G that space is used also by
+meta-data so the space available for storing volumes (data) is a bit smaller.
+
+Cinder creation of 10 volumes * 2GB each when it should have failed after
+creating 19 volumes (18GB of data). The caused by cinder-scheduler receiving
+old provisioned capacity updates from cinder-volume while it's creating volumes
+(both scheduler and volume mgr. keep track of provisioned capacity). Also,
+cinder-volume does not keep track of volumes that are in process of being
+created when reporting provisioned capacity.
+
+Scenario A (stale data):
+1. cinder-scheduler: provisioned += vol_size, provisioned < total ? yes -> schedule ok
+2. cinder-volume (at the same time): update scheduler with current provisioned capacity
+3. cinder-volume: create volume
+4. cinder-scheduler: update provisioned with cinder-volume reported value; wrong,
+   it should keep the current value
+
+cinder-scheduler does have a protection mechanism for updating "provisioned"
+value based on time stamp but the driver does not label capabilities with a
+time stamp when sending out updates.
+
+Scenario B (long running lvm operations):
+1. cinder-scheduler allows multiple volumes to be created
+2. cinder-volume starts creating volumes
+3. operations are long running
+4. cinder-volume reports provisioned capacity less than it should (lvm ops.
+   are still in progress)
+5. cinder-scheduler: update provisioned with reported value; wrong, it should
+   keep the current value
+
+---
+ cinder/scheduler/host_manager.py        | 20 +++++++++++++++++---
+ cinder/tests/unit/volume/test_volume.py |  5 ++++-
+ cinder/volume/drivers/lvm.py            | 24 +++++++++++++++++++++++-
+ cinder/volume/manager.py                |  2 ++
+ 4 files changed, 46 insertions(+), 5 deletions(-)
+
+diff --git a/cinder/scheduler/host_manager.py b/cinder/scheduler/host_manager.py
+index 6416916..a0ce50c 100644
+--- a/cinder/scheduler/host_manager.py
++++ b/cinder/scheduler/host_manager.py
+@@ -18,6 +18,7 @@ Manage backends in the current zone.
+ """
+ 
+ import collections
++import six
+ 
+ from oslo_config import cfg
+ from oslo_log import log as logging
+@@ -196,7 +197,10 @@ class BackendState(object):
+         self.update_capabilities(capability, service)
+ 
+         if capability:
+-            if self.updated and self.updated > capability['timestamp']:
++            timestamp = capability['timestamp']
++            if isinstance(timestamp, six.string_types):
++                timestamp = timeutils.parse_strtime(timestamp)
++            if self.updated and self.updated > timestamp:
+                 return
+ 
+             # Update backend level info
+@@ -286,7 +290,10 @@ class BackendState(object):
+         self.vendor_name = capability.get('vendor_name', None)
+         self.driver_version = capability.get('driver_version', None)
+         self.storage_protocol = capability.get('storage_protocol', None)
+-        self.updated = capability['timestamp']
++        timestamp = capability['timestamp']
++        if isinstance(timestamp, six.string_types):
++            timestamp = timeutils.parse_strtime(timestamp)
++        self.updated = timestamp
+ 
+     def consume_from_volume(self, volume):
+         """Incrementally update host state from a volume."""
+@@ -326,7 +333,10 @@ class PoolState(BackendState):
+         """Update information about a pool from its volume_node info."""
+         self.update_capabilities(capability, service)
+         if capability:
+-            if self.updated and self.updated > capability['timestamp']:
++            timestamp = capability['timestamp']
++            if isinstance(timestamp, six.string_types):
++                timestamp = timeutils.parse_strtime(timestamp)
++            if self.updated and self.updated > timestamp:
+                 return
+             self.update_backend(capability)
+ 
+@@ -472,6 +482,8 @@ class HostManager(object):
+         # TODO(geguileo): In P - Remove the next line since we receive the
+         # timestamp
+         timestamp = timestamp or timeutils.utcnow()
++        if isinstance(timestamp, six.string_types):
++            timestamp = timeutils.parse_strtime(timestamp)
+         # Copy the capabilities, so we don't modify the original dict
+         capab_copy = dict(capabilities)
+         capab_copy["timestamp"] = timestamp
+@@ -520,6 +532,8 @@ class HostManager(object):
+         updated = []
+         capa_new = self.service_states.get(backend, {})
+         timestamp = timestamp or timeutils.utcnow()
++        if isinstance(timestamp, six.string_types):
++            timestamp = timeutils.parse_strtime(timestamp)
+ 
+         # Compare the capabilities and timestamps to decide notifying
+         if not capa_new:
+diff --git a/cinder/tests/unit/volume/test_volume.py b/cinder/tests/unit/volume/test_volume.py
+index 6341f95..4f80fc7 100644
+--- a/cinder/tests/unit/volume/test_volume.py
++++ b/cinder/tests/unit/volume/test_volume.py
+@@ -171,7 +171,10 @@ class VolumeTestCase(base.BaseVolumeTestCase):
+                     m_get_goodness.return_value = mygoodnessfunction
+                     manager._report_driver_status(1)
+                     self.assertTrue(m_get_stats.called)
+-                    mock_update.assert_called_once_with(expected)
++                    mock_update.assert_called_once()
++                    actual = dict(mock_update.call_args[0][0])
++                    del actual['timestamp']
++                    self.assertEqual(actual, expected)
+ 
+     def test_is_working(self):
+         # By default we have driver mocked to be initialized...
+diff --git a/cinder/volume/drivers/lvm.py b/cinder/volume/drivers/lvm.py
+index 243d647..3a233c0 100644
+--- a/cinder/volume/drivers/lvm.py
++++ b/cinder/volume/drivers/lvm.py
+@@ -26,11 +26,13 @@ import math
+ import os
+ import socket
+ 
++from oslo_concurrency import lockutils
+ from oslo_concurrency import processutils
+ from oslo_config import cfg
+ from oslo_log import log as logging
+ from oslo_utils import excutils
+ from oslo_utils import importutils
++from oslo_utils import timeutils
+ from oslo_utils import units
+ import six
+ 
+@@ -130,6 +132,10 @@ class LVMVolumeDriver(driver.VolumeDriver):
+             self.configuration.max_over_subscription_ratio = \
+                 self.configuration.lvm_max_over_subscription_ratio
+ 
++        self.reserved_capacity_gb = 0
++        self.lock_reserved_capacity_gb = lockutils.internal_lock(
++            'cinder-reserved-capacity')
++
+     def do_setup(self, context):
+         LOG.debug("LVMVolumeDriver do_setup called.")
+         """Cleanup the volume driver does while starting."""
+@@ -209,7 +215,19 @@ class LVMVolumeDriver(driver.VolumeDriver):
+         if vg is not None:
+             vg_ref = vg
+ 
+-        vg_ref.create_volume(name, size, lvm_type, mirror_count)
++        try:
++            try:
++                size_gb = float(size.replace('g', ''))
++            except ValueError:
++                LOG.warning(('Failed to reserve volume space. '
++                             'Unknown size: %s'), size)
++                size_gb = 0
++            with self.lock_reserved_capacity_gb:
++                self.reserved_capacity_gb += size_gb
++            vg_ref.create_volume(name, size, lvm_type, mirror_count)
++        finally:
++            with self.lock_reserved_capacity_gb:
++                self.reserved_capacity_gb -= size_gb
+ 
+     def _update_volume_stats(self):
+         """Retrieve stats info from volume group."""
+@@ -253,6 +271,9 @@ class LVMVolumeDriver(driver.VolumeDriver):
+             provisioned_capacity = round(
+                 float(total_capacity) - float(free_capacity), 2)
+ 
++        # Report reserved capacity as provisioned
++        provisioned_capacity += self.reserved_capacity_gb
++
+         location_info = \
+             ('LVMVolumeDriver:%(hostname)s:%(vg)s'
+              ':%(lvm_type)s:%(lvm_mirrors)s' %
+@@ -271,6 +292,7 @@ class LVMVolumeDriver(driver.VolumeDriver):
+         # XXX FIXME if multipool support is added to LVM driver.
+         single_pool = {}
+         single_pool.update(dict(
++            timestamp=timeutils.utcnow().isoformat(),
+             pool_name=data["volume_backend_name"],
+             total_capacity_gb=total_capacity,
+             free_capacity_gb=free_capacity,
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index 63ee6cb..cd24888 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -2476,6 +2476,8 @@ class VolumeManager(manager.CleanableManager,
+             self.init_host()
+         else:
+             volume_stats = self.driver.get_volume_stats(refresh=True)
++            if "timestamp" not in volume_stats:
++                volume_stats["timestamp"] = timeutils.utcnow().isoformat()
+             if self.extra_capabilities:
+                 volume_stats.update(self.extra_capabilities)
+             if volume_stats:
+-- 
+2.7.4
+

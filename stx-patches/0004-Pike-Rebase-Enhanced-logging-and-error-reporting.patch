@@ -1,0 +1,2056 @@
+From 0156be3260830ab6e45b088ea9b124ac85c830c8 Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Tue, 30 Jun 2015 15:17:40 +0300
+Subject: [PATCH 04/53] Pike Rebase: Enhanced logging and error reporting
+
+- failed cinder create due to glance image size restriction
+- add volume fault table to record volume fault
+- return error message in volume fault when volume status is error
+
+Introduced by G.Le via d70dcff.
+
+===
+
+Add error details in case of ceph volume creation failure
+
+In case of a ceph volume creation failure, the volume_fault field
+for cinder volumes is updated with a relevant error for both CLI
+and dashboard
+
+===
+
+Cinder in-service patching; improve error messages
+
+Improve error messages for both volume and snapshot creation failures
+during in-service patching.
+
+===
+
+Enhanced Cinder logging
+
+cinder-volume.log
+- add info logs for create/remove iscsi target,
+- add more info logs for creating volume.
+
+cinder-scheduler.log:
+- add info log for create_volume.
+
+====
+
+Enhanced Logging for DB connections
+
+Add debug trace in cinder service to monitor sqlalchemy connection
+pool events and display run time pool status. If necessary these
+traces could be turned on in design testing to help debugging
+connection pool issues.
+
+A patch in python-sqlalchemy (commit ea07843082e) is required to
+display pool status when monitored events occur.
+
+===
+
+Improved logging when deleting an LVM volume with open file handles
+
+This commit:
+ o adds logging for attaching, detaching & reattaching a volume
+ o list processes that keep the volume open if delete fails
+ o adds a custom message to the fault table when delete fails
+
+(cherry picked from commit cc1370542ce68bde2a075d8a26cdceae4ea80e99)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 2c10059d8e2e8247c1ef1fe9a73ac63d8c0fe799)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 9d899ae0fabf20e9fbe9756db8c386f8aab6e08a)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit c6846125f0a0b6ca30548ba88aa84a4c6700774f)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 4ddb1c7ec1a59c0a55dbc0afd5d704d2e80d4888)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 6bd58c89ff830e6dd9dead90a830fd7fc958b02c)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/api/v1/snapshots.py                         |  19 +++-
+ cinder/api/v1/volumes.py                           |  33 +++++-
+ cinder/api/v2/views/volumes.py                     |  23 ++++
+ cinder/api/views/snapshots.py                      |  24 ++++
+ cinder/brick/local_dev/lvm.py                      |  48 ++++++--
+ cinder/db/api.py                                   |  34 ++++++
+ cinder/db/sqlalchemy/api.py                        | 123 ++++++++++++++++++++-
+ .../versions/106_add_snapshot_fault_table.py       |  52 +++++++++
+ cinder/db/sqlalchemy/models.py                     |  35 ++++++
+ cinder/exception.py                                |   7 ++
+ cinder/opts.py                                     |   1 +
+ cinder/scheduler/filter_scheduler.py               |  10 ++
+ cinder/scheduler/filters/capacity_filter.py        |  73 +++++++++---
+ cinder/service.py                                  |  53 +++++++++
+ .../tests/unit/api/contrib/test_snapshot_manage.py |  11 +-
+ cinder/tests/unit/api/v1/test_snapshots.py         |   1 +
+ cinder/tests/unit/api/v1/test_volumes.py           |  15 ++-
+ cinder/tests/unit/api/v2/test_snapshots.py         |   1 +
+ cinder/tests/unit/api/v2/test_volumes.py           |   3 +-
+ cinder/tests/unit/api/v3/test_snapshot_manage.py   |   4 +-
+ cinder/tests/unit/api/v3/test_volumes.py           |   3 +-
+ cinder/tests/unit/objects/test_snapshot.py         |   2 +-
+ cinder/tests/unit/objects/test_volume.py           |   2 +-
+ cinder/tests/unit/scheduler/test_host_filters.py   |  32 ++++--
+ cinder/volume/flows/manager/create_volume.py       |  90 ++++++++++-----
+ cinder/volume/manager.py                           | 112 +++++++++++++++++--
+ cinder/volume/targets/iscsi.py                     |  14 +++
+ cinder/volume/targets/lio.py                       |  16 ++-
+ cinder/volume/targets/tgt.py                       |   7 +-
+ cinder/volume/utils.py                             |  67 +++++++++++
+ 30 files changed, 825 insertions(+), 90 deletions(-)
+ create mode 100644 cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
+
+diff --git a/cinder/api/v1/snapshots.py b/cinder/api/v1/snapshots.py
+index 76c4416..2144065 100644
+--- a/cinder/api/v1/snapshots.py
++++ b/cinder/api/v1/snapshots.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """The volumes snapshots api."""
+ 
+@@ -21,9 +28,10 @@ from webob import exc
+ 
+ from cinder.api.openstack import wsgi
+ from cinder.api.v2 import snapshots as snapshots_v2
++from cinder.volume import utils as volume_utils
+ 
+ 
+-def _snapshot_v2_to_v1(snapv2_result):
++def _snapshot_v2_to_v1(context, snapv2_result):
+     """Transform a v2 snapshot dict to v1."""
+     snapshots = snapv2_result.get('snapshots')
+     if snapshots is None:
+@@ -36,6 +44,9 @@ def _snapshot_v2_to_v1(snapv2_result):
+         # Name and description were renamed
+         snapv1['display_name'] = snapv1.pop('name', '')
+         snapv1['display_description'] = snapv1.pop('description', '')
++        fault = volume_utils.get_snapshot_fault(context, snapv1['id'])
++        if fault:
++            snapv1['error'] = fault.get('message')
+ 
+     return snapv2_result
+ 
+@@ -58,17 +69,19 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
+     def show(self, req, id):
+         """Return data about the given snapshot."""
+         result = super(SnapshotsController, self).show(req, id)
+-        return _snapshot_v2_to_v1(result)
++        return _snapshot_v2_to_v1(req.environ['cinder.context'], result)
+ 
+     def index(self, req):
+         """Returns a summary list of snapshots."""
+         return _snapshot_v2_to_v1(
++            req.environ['cinder.context'],
+             super(SnapshotsController, self).index(
+                 _update_search_opts(req)))
+ 
+     def detail(self, req):
+         """Returns a detailed list of snapshots."""
+         return _snapshot_v2_to_v1(
++            req.environ['cinder.context'],
+             super(SnapshotsController, self).detail(
+                 _update_search_opts(req)))
+ 
+@@ -90,12 +103,14 @@ class SnapshotsController(snapshots_v2.SnapshotsController):
+             body['snapshot']['metadata'] = {}
+ 
+         return _snapshot_v2_to_v1(
++            req.environ['cinder.context'],
+             super(SnapshotsController, self).create(req, body))
+ 
+     def update(self, req, id, body):
+         """Update a snapshot."""
+         try:
+             return _snapshot_v2_to_v1(
++                req.environ['cinder.context'],
+                 super(SnapshotsController, self).update(req, id, body))
+         except exc.HTTPBadRequest:
+             raise exc.HTTPUnprocessableEntity()
+diff --git a/cinder/api/v1/volumes.py b/cinder/api/v1/volumes.py
+index 61dea66..24e31ef 100644
+--- a/cinder/api/v1/volumes.py
++++ b/cinder/api/v1/volumes.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """The volumes api."""
+ 
+@@ -21,6 +28,7 @@ from webob import exc
+ 
+ from cinder.api.openstack import wsgi
+ from cinder.api.v2 import volumes as volumes_v2
++from cinder.volume import utils as volume_utils
+ 
+ 
+ LOG = logging.getLogger(__name__)
+@@ -43,7 +51,7 @@ def _attachment_v2_to_v1(vol):
+     return d
+ 
+ 
+-def _volume_v2_to_v1(volv2_results, image_id=None):
++def _volume_v2_to_v1(context, volv2_results, image_id=None):
+     """Converts v2 volume details to v1 format."""
+     volumes = volv2_results.get('volumes')
+     if volumes is None:
+@@ -78,6 +86,16 @@ def _volume_v2_to_v1(volv2_results, image_id=None):
+         vol.pop('updated_at', None)
+         vol.pop('user_id', None)
+ 
++        # WRS-extension Decoupling fault conditions from only being displayed
++        # when the volume is only in the error state. We have scenarios where a
++        # fault occurs (like volume in use) where we won't land in an error
++        # state. We might be in an error_deleting or available state. So if
++        # we've had a fault populated for the volume, populate it for
++        # displaying to the user.
++        fault = volume_utils.get_volume_fault(context, vol['id'])
++        if fault:
++            vol['error'] = fault.get('message')
++
+         LOG.debug("vol=%s", vol)
+ 
+     return volv2_results
+@@ -88,19 +106,22 @@ class VolumeController(volumes_v2.VolumeController):
+ 
+     def show(self, req, id):
+         """Return data about the given volume."""
+-        return _volume_v2_to_v1(super(VolumeController, self).show(
+-            req, id))
++        return _volume_v2_to_v1(
++            req.environ['cinder.context'],
++            super(VolumeController, self).show(req, id))
+ 
+     def index(self, req):
+         """Returns a summary list of volumes."""
+ 
+         # The v1 info was much more detailed than the v2 non-detailed result
+         return _volume_v2_to_v1(
++            req.environ['cinder.context'],
+             super(VolumeController, self).detail(req))
+ 
+     def detail(self, req):
+         """Returns a detailed list of volumes."""
+         return _volume_v2_to_v1(
++            req.environ['cinder.context'],
+             super(VolumeController, self).detail(req))
+ 
+     @wsgi.response(http_client.OK)
+@@ -116,6 +137,7 @@ class VolumeController(volumes_v2.VolumeController):
+ 
+         try:
+             return _volume_v2_to_v1(
++                req.environ['cinder.context'],
+                 super(VolumeController, self).create(req, body),
+                 image_id=image_id)
+         except exc.HTTPBadRequest as e:
+@@ -133,8 +155,9 @@ class VolumeController(volumes_v2.VolumeController):
+             raise exc.HTTPUnprocessableEntity()
+ 
+         try:
+-            return _volume_v2_to_v1(super(VolumeController, self).update(
+-                req, id, body))
++            return _volume_v2_to_v1(
++                req.environ['cinder.context'],
++                super(VolumeController, self).update(req, id, body))
+         except exc.HTTPBadRequest:
+             raise exc.HTTPUnprocessableEntity()
+ 
+diff --git a/cinder/api/v2/views/volumes.py b/cinder/api/v2/views/volumes.py
+index 8e9139b..84f4f13 100644
+--- a/cinder/api/v2/views/volumes.py
++++ b/cinder/api/v2/views/volumes.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ import six
+ 
+@@ -19,6 +26,7 @@ from cinder.api import common
+ from cinder import group as group_api
+ from cinder.objects import fields
+ from cinder.volume import group_types
++from cinder.volume import utils as volume_utils
+ 
+ 
+ class ViewBuilder(common.ViewBuilder):
+@@ -89,6 +97,7 @@ class ViewBuilder(common.ViewBuilder):
+                 'replication_status': volume.get('replication_status'),
+                 'consistencygroup_id': volume.get('consistencygroup_id'),
+                 'multiattach': volume.get('multiattach'),
++                'error': self._get_volume_fault(request, volume)
+             }
+         }
+         if request.environ['cinder.context'].is_admin:
+@@ -108,6 +117,20 @@ class ViewBuilder(common.ViewBuilder):
+ 
+         return volume_ref
+ 
++    def _get_volume_fault(self, request, volume):
++        msg = ""
++        # Decoupling fault conditions from only being displayed when the volume
++        # is only in the error state. We have scenarios where a fault occurs
++        # (like volume in use) where we won't land in an error state. We might
++        # be in an error_deleting or available state. So if we've had a fault
++        # populated for the volume, populate it for displaying to the user.
++        fault = volume_utils.get_volume_fault(
++            request.environ['cinder.context'],
++            volume.get('id'))
++        if fault:
++            msg = fault.get('message')
++        return msg
++
+     def _is_volume_encrypted(self, volume):
+         """Determine if volume is encrypted."""
+         return volume.get('encryption_key_id') is not None
+diff --git a/cinder/api/views/snapshots.py b/cinder/api/views/snapshots.py
+index 56f7733..c698ffd 100644
+--- a/cinder/api/views/snapshots.py
++++ b/cinder/api/views/snapshots.py
+@@ -12,8 +12,16 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ from cinder.api import common
++from cinder.volume import utils as volume_utils
+ 
+ 
+ class ViewBuilder(common.ViewBuilder):
+@@ -53,6 +61,7 @@ class ViewBuilder(common.ViewBuilder):
+                 'status': snapshot.status,
+                 'size': snapshot.volume_size,
+                 'metadata': metadata,
++                'error': self._get_snapshot_fault(request, snapshot)
+             }
+         }
+ 
+@@ -76,3 +85,18 @@ class ViewBuilder(common.ViewBuilder):
+             snapshots_dict[self._collection_name + '_links'] = snapshots_links
+ 
+         return snapshots_dict
++
++    def _get_snapshot_fault(self, request, snapshot):
++        msg = ""
++        # Decoupling fault conditions from only being displayed when the
++        # snapshot is only in the error state. We have scenarios where a fault
++        # occurs (like snapshot in use) where we won't land in an error state.
++        # We might be in an error_deleting or available state. So if we've had
++        # a fault populated for the snapshot, populate it for displaying to the
++        # user.
++        fault = volume_utils.get_snapshot_fault(
++            request.environ['cinder.context'],
++            snapshot.id)
++        if fault:
++            msg = fault.get('message')
++        return msg
+diff --git a/cinder/brick/local_dev/lvm.py b/cinder/brick/local_dev/lvm.py
+index 7dcb208..9236433 100644
+--- a/cinder/brick/local_dev/lvm.py
++++ b/cinder/brick/local_dev/lvm.py
+@@ -30,6 +30,7 @@ from six import moves
+ from cinder import exception
+ from cinder import utils
+ 
++from cinder.exception import LVMBackingStoreIsBusy
+ 
+ LOG = logging.getLogger(__name__)
+ 
+@@ -721,11 +722,11 @@ class LVM(executor.Executor):
+                 '%s/%s' % (self.vg_name, name),
+                 root_helper=self._root_helper, run_as_root=True)
+         except putils.ProcessExecutionError as err:
+-            LOG.debug('Error reported running lvremove: CMD: %(command)s, '
+-                      'RESPONSE: %(response)s',
+-                      {'command': err.cmd, 'response': err.stderr})
++            LOG.info(('Error reported running lvremove: CMD: %(command)s, '
++                      'RESPONSE: %(response)s'),
++                     {'command': err.cmd, 'response': err.stderr})
+ 
+-            LOG.debug('Attempting udev settle and retry of lvremove...')
++            LOG.info('Attempting udev settle and retry of lvremove...')
+             run_udevadm_settle()
+ 
+             # The previous failing lvremove -f might leave behind
+@@ -734,12 +735,39 @@ class LVM(executor.Executor):
+             # Therefore we need to skip suspended devices on retry.
+             LVM_CONFIG += 'devices { ignore_suspended_devices = 1}'
+ 
+-            self._execute(
+-                'lvremove',
+-                '--config', LVM_CONFIG,
+-                '-f',
+-                '%s/%s' % (self.vg_name, name),
+-                root_helper=self._root_helper, run_as_root=True)
++            try:
++                self._execute(
++                    'lvremove',
++                    '--config', LVM_CONFIG,
++                    '-f',
++                    '%s/%s' % (self.vg_name, name),
++                    root_helper=self._root_helper, run_as_root=True)
++            except putils.ProcessExecutionError as err:
++                if all(x in err.stderr for x in ['Logical volume', 'in use']):
++                    # Get pids that keeps volume or snapshot open
++                    mapper = "/dev/mapper/cinder--volumes-" + \
++                        name.replace("-", "--")
++                    root_helper = self._root_helper
++                    (stdout, __) = putils.trycmd('fuser', mapper,
++                                                 root_helper=root_helper,
++                                                 run_as_root=True)
++                    # Upon a successful run, 'fuser' will output the file name
++                    # to stderr and the PIDs using the file to stdout. Hence we
++                    # only need to split stdout into the pids list, no need to
++                    # slice stdout for removing the file name
++                    pids = stdout.split()
++                    # Get process names that keep our volume or snapshot open
++                    procs = []
++                    for pid in pids:
++                        pid = pid.strip()
++                        (name, __) = putils.trycmd('ps', '-co', 'cmd= ', pid,
++                                                   root_helper=root_helper,
++                                                   run_as_root=True)
++                        procs.append("%s (pid: %s)" % (name.rstrip(), pid))
++
++                    raise LVMBackingStoreIsBusy(backing_vol=mapper,
++                                                procs=", ".join(procs))
++                raise
+             LOG.debug('Successfully deleted volume: %s after '
+                       'udev settle.', name)
+ 
+diff --git a/cinder/db/api.py b/cinder/db/api.py
+index 25c4065..c850aa7 100644
+--- a/cinder/db/api.py
++++ b/cinder/db/api.py
+@@ -524,6 +524,21 @@ def snapshot_metadata_update(context, snapshot_id, metadata, delete):
+ ####################
+ 
+ 
++def snapshot_fault_get(context, snapshot_id):
++    """Get fault for a snapshot."""
++    return IMPL.snapshot_fault_get(context, snapshot_id)
++
++
++def snapshot_fault_delete(context, snapshot_id):
++    """Delete ."""
++    return IMPL.snapshot_fault_delete(context, snapshot_id)
++
++
++def snapshot_fault_update(context, snapshot_id, values):
++    """Update fault if it exists, otherwise create it."""
++    return IMPL.snapshot_fault_update(context, snapshot_id, values)
++
++
+ def volume_metadata_get(context, volume_id):
+     """Get all metadata for a volume."""
+     return IMPL.volume_metadata_get(context, volume_id)
+@@ -562,6 +577,25 @@ def volume_admin_metadata_update(context, volume_id, metadata, delete,
+     return IMPL.volume_admin_metadata_update(context, volume_id, metadata,
+                                              delete, add, update)
+ 
++##################
++# WRS-extend
++#
++
++
++def volume_fault_get(context, volume_id):
++    """Get fault for a volume."""
++    return IMPL.volume_fault_get(context, volume_id)
++
++
++def volume_fault_delete(context, volume_id):
++    """Delete ."""
++    return IMPL.volume_fault_delete(context, volume_id)
++
++
++def volume_fault_update(context, volume_id, values):
++    """Update fault if it exists, otherwise create it."""
++    return IMPL.volume_fault_update(context, volume_id, values)
++
+ 
+ ##################
+ 
+diff --git a/cinder/db/sqlalchemy/api.py b/cinder/db/sqlalchemy/api.py
+index d80fbfd..cda5826 100644
+--- a/cinder/db/sqlalchemy/api.py
++++ b/cinder/db/sqlalchemy/api.py
+@@ -1596,6 +1596,11 @@ def volume_destroy(context, volume_id):
+             update({'deleted': True,
+                     'deleted_at': now,
+                     'updated_at': literal_column('updated_at')})
++        model_query(context, models.VolumeFault, session=session).\
++            filter_by(volume_id=volume_id).\
++            update({'deleted': True,
++                    'deleted_at': now,
++                    'updated_at': literal_column('updated_at')})
+     del updated_values['updated_at']
+     return updated_values
+ 
+@@ -1786,6 +1791,7 @@ def _volume_get_query(context, session=None, project_only=False,
+             options(joinedload('volume_metadata')).\
+             options(joinedload('volume_admin_metadata')).\
+             options(joinedload('volume_type')).\
++            options(joinedload('volume_fault')).\
+             options(joinedload('volume_attachment')).\
+             options(joinedload('consistencygroup')).\
+             options(joinedload('group'))
+@@ -1794,6 +1800,7 @@ def _volume_get_query(context, session=None, project_only=False,
+                            project_only=project_only).\
+             options(joinedload('volume_metadata')).\
+             options(joinedload('volume_type')).\
++            options(joinedload('volume_fault')).\
+             options(joinedload('volume_attachment')).\
+             options(joinedload('consistencygroup')).\
+             options(joinedload('group'))
+@@ -2852,6 +2859,54 @@ def volume_admin_metadata_update(context, volume_id, metadata, delete,
+ 
+ 
+ ###################
++# WRS-extend
++#
++
++def _volume_fault_get_query(context, volume_id, session=None):
++    return model_query(context, models.VolumeFault, session=session, read_deleted="no").\
++        filter_by(volume_id=volume_id)
++
++
++@require_context
++@require_volume_exists
++def volume_fault_get(context, volume_id):
++    return _volume_fault_get_query(context, volume_id).first()
++
++
++@require_context
++@require_volume_exists
++@_retry_on_deadlock
++def volume_fault_delete(context, volume_id):
++    _volume_fault_get_query(context, volume_id).\
++        update({'deleted': True,
++                'deleted_at': timeutils.utcnow(),
++                'updated_at': literal_column('updated_at')})
++
++
++@require_context
++@require_volume_exists
++@_retry_on_deadlock
++def volume_fault_update(context, volume_id, values):
++    session = get_session()
++
++    with session.begin(subtransactions=True):
++        # delete existing fault
++        fault = _volume_fault_get_query(context, volume_id,
++                                        session=session).first()
++        if fault is not None:
++            fault.update({'deleted': True})
++            fault.save(session=session)
++
++        # add new fault
++        fault = models.VolumeFault()
++        values.update({'volume_id': volume_id})
++        fault.update(values)
++        fault.save(session=session)
++
++    return _volume_fault_get_query(context, volume_id).first()
++
++
++###################
+ 
+ 
+ @require_context
+@@ -2889,6 +2944,12 @@ def snapshot_destroy(context, snapshot_id):
+             update({'deleted': True,
+                     'deleted_at': utcnow,
+                     'updated_at': literal_column('updated_at')})
++        model_query(context, models.SnapshotFault, session=session).\
++            filter_by(snapshot_id=snapshot_id).\
++            update({'deleted': True,
++                    'deleted_at': utcnow,
++                    'updated_at': literal_column('updated_at')})
++
+     del updated_values['updated_at']
+     return updated_values
+ 
+@@ -2899,6 +2960,7 @@ def _snapshot_get(context, snapshot_id, session=None):
+                          project_only=True).\
+         options(joinedload('volume')).\
+         options(joinedload('snapshot_metadata')).\
++        options(joinedload('snapshot_fault')).\
+         filter_by(id=snapshot_id).\
+         first()
+ 
+@@ -2954,7 +3016,8 @@ def snapshot_get_all(context, filters=None, marker=None, limit=None,
+ def _snaps_get_query(context, session=None, project_only=False):
+     return model_query(context, models.Snapshot, session=session,
+                        project_only=project_only).\
+-        options(joinedload('snapshot_metadata'))
++        options(joinedload('snapshot_metadata')).\
++        options(joinedload('snapshot_fault'))
+ 
+ 
+ @apply_like_filters(model=models.Snapshot)
+@@ -3025,6 +3088,7 @@ def snapshot_get_all_for_volume(context, volume_id):
+                        project_only=True).\
+         filter_by(volume_id=volume_id).\
+         options(joinedload('snapshot_metadata')).\
++        options(joinedload('snapshot_fault')).\
+         all()
+ 
+ 
+@@ -3063,8 +3127,10 @@ def snapshot_get_all_by_host(context, host, filters=None):
+             host_attr = getattr(models.Volume, 'host')
+             conditions = [host_attr == host,
+                           host_attr.op('LIKE')(host + '#%')]
+-            query = query.join(models.Snapshot.volume).filter(
+-                or_(*conditions)).options(joinedload('snapshot_metadata'))
++            query = query.join(models.Snapshot.volume).\
++                filter(or_(*conditions)).\
++                options(joinedload('snapshot_metadata')).\
++                options(joinedload('snapshot_fault'))
+             return query.all()
+     elif not host:
+         return []
+@@ -3132,7 +3198,9 @@ def snapshot_get_all_by_project(context, project_id, filters=None, marker=None,
+     if not query:
+         return []
+ 
+-    query = query.options(joinedload('snapshot_metadata'))
++    query = query.\
++        options(joinedload('snapshot_metadata')).\
++        options(joinedload('snapshot_fault'))
+     return query.all()
+ 
+ 
+@@ -3170,7 +3238,9 @@ def snapshot_get_all_active_by_window(context, begin, end=None,
+     query = query.filter(or_(models.Snapshot.deleted_at == None,  # noqa
+                              models.Snapshot.deleted_at > begin))
+     query = query.options(joinedload(models.Snapshot.volume))
+-    query = query.options(joinedload('snapshot_metadata'))
++    query = query.\
++        options(joinedload('snapshot_metadata')).\
++        options(joinedload('snapshot_fault'))
+     if end:
+         query = query.filter(models.Snapshot.created_at < end)
+     if project_id:
+@@ -3188,6 +3258,49 @@ def snapshot_update(context, snapshot_id, values):
+         raise exception.SnapshotNotFound(snapshot_id=snapshot_id)
+ 
+ 
++def _snapshot_fault_get_query(context, snapshot_id, session=None):
++    return model_query(context, models.SnapshotFault, session=session, read_deleted="no").\
++        filter_by(snapshot_id=snapshot_id)
++
++
++@require_context
++@require_snapshot_exists
++def snapshot_fault_get(context, snapshot_id):
++    return _snapshot_fault_get_query(context, snapshot_id).first()
++
++
++@require_context
++@require_snapshot_exists
++@_retry_on_deadlock
++def snapshot_fault_delete(context, snapshot_id):
++    _snapshot_fault_get_query(context, snapshot_id).\
++        update({'deleted': True,
++                'deleted_at': timeutils.utcnow(),
++                'updated_at': literal_column('updated_at')})
++
++
++@require_context
++@require_snapshot_exists
++@_retry_on_deadlock
++def snapshot_fault_update(context, snapshot_id, values):
++    session = get_session()
++
++    with session.begin(subtransactions=True):
++        # delete existing fault
++        fault = _snapshot_fault_get_query(context, snapshot_id,
++                                          session=session).first()
++        if fault is not None:
++            fault.update({'deleted': True})
++            fault.save(session=session)
++
++        # add new fault
++        fault = models.SnapshotFault()
++        values.update({'snapshot_id': snapshot_id})
++        fault.update(values)
++        fault.save(session=session)
++
++    return _snapshot_fault_get_query(context, snapshot_id).first()
++
+ ####################
+ 
+ 
+diff --git a/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py b/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
+new file mode 100644
+index 0000000..fe30430
+--- /dev/null
++++ b/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
+@@ -0,0 +1,52 @@
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++from sqlalchemy import Boolean, Column, DateTime, Text
++from sqlalchemy import Integer, MetaData, String, Table, ForeignKey
++from sqlalchemy.dialects.mysql import MEDIUMTEXT
++
++from oslo_log import log as logging
++
++LOG = logging.getLogger(__name__)
++
++
++def MediumText():
++    return Text().with_variant(MEDIUMTEXT(), 'mysql')
++
++
++def upgrade(migrate_engine):
++    meta = MetaData()
++    meta.bind = migrate_engine
++
++    Table('snapshots', meta, autoload=True)
++
++    # New table
++    snapshot_fault = Table(
++        'snapshot_fault', meta,
++        Column('created_at', DateTime),
++        Column('updated_at', DateTime),
++        Column('deleted_at', DateTime),
++        Column('deleted', Boolean),
++        Column('id', Integer, primary_key=True, nullable=False),
++        Column('snapshot_id', String(length=36), ForeignKey('snapshots.id'),
++               nullable=False),
++        Column('message', String(length=255)),
++        Column('details', MediumText()),
++        mysql_engine='InnoDB',
++        mysql_charset='utf8'
++    )
++
++    try:
++        snapshot_fault.create()
++    except Exception:
++        LOG.error("Table |%s| not created!", repr(snapshot_fault))
++        raise
+diff --git a/cinder/db/sqlalchemy/models.py b/cinder/db/sqlalchemy/models.py
+index 512fe14..8f6eb5d 100644
+--- a/cinder/db/sqlalchemy/models.py
++++ b/cinder/db/sqlalchemy/models.py
+@@ -32,6 +32,7 @@ from oslo_utils import timeutils
+ from sqlalchemy import and_, func, select
+ from sqlalchemy import bindparam
+ from sqlalchemy import Column, Integer, String, Text, schema
++from sqlalchemy.dialects.mysql import MEDIUMTEXT
+ from sqlalchemy.ext.declarative import declarative_base
+ from sqlalchemy import ForeignKey, DateTime, Boolean, UniqueConstraint
+ from sqlalchemy.orm import backref, column_property, relationship, validates
+@@ -41,6 +42,10 @@ CONF = cfg.CONF
+ BASE = declarative_base()
+ 
+ 
++def MediumText():
++    return Text().with_variant(MEDIUMTEXT(), 'mysql')
++
++
+ class CinderBase(models.TimestampMixin,
+                  models.ModelBase):
+     """Base class for Cinder Models."""
+@@ -345,6 +350,20 @@ class VolumeAdminMetadata(BASE, CinderBase):
+                           'VolumeAdminMetadata.deleted == False)')
+ 
+ 
++class VolumeFault(BASE, CinderBase):
++    """Represents a fault for a volume."""
++    __tablename__ = 'volume_fault'
++    id = Column(Integer, primary_key=True)
++    message = Column(String(255))
++    details = Column(MediumText())
++    volume_id = Column(String(36), ForeignKey('volumes.id'), nullable=False)
++    volume = relationship(Volume, backref="volume_fault",
++                          foreign_keys=volume_id,
++                          primaryjoin='and_('
++                          'VolumeFault.volume_id == Volume.id,'
++                          'VolumeFault.deleted == False)')
++
++
+ class VolumeAttachment(BASE, CinderBase):
+     """Represents a volume attachment for a vm."""
+     __tablename__ = 'volume_attachment'
+@@ -709,6 +728,22 @@ class Snapshot(BASE, CinderBase):
+         primaryjoin='Snapshot.group_snapshot_id == GroupSnapshot.id')
+ 
+ 
++class SnapshotFault(BASE, CinderBase):
++    """Represents a fault for a snapshot."""
++    __tablename__ = 'snapshot_fault'
++    id = Column(Integer, primary_key=True)
++    message = Column(String(255))
++    details = Column(MediumText())
++    snapshot_id = Column(
++        String(36), ForeignKey('snapshots.id'), nullable=False)
++    snapshot = relationship(
++        Snapshot, backref="snapshot_fault",
++        foreign_keys=snapshot_id,
++        primaryjoin=('and_('
++                     'SnapshotFault.snapshot_id == Snapshot.id,'
++                     'SnapshotFault.deleted == False)'))
++
++
+ class SnapshotMetadata(BASE, CinderBase):
+     """Represents a metadata key/value pair for a snapshot."""
+     __tablename__ = 'snapshot_metadata'
+diff --git a/cinder/exception.py b/cinder/exception.py
+index 33bddc3..175b8c5 100644
+--- a/cinder/exception.py
++++ b/cinder/exception.py
+@@ -1435,3 +1435,10 @@ class ErrorInParsingArguments(VolumeDriverException):
+ # GPFS driver
+ class GPFSDriverUnsupportedOperation(VolumeBackendAPIException):
+     message = _("GPFS driver unsupported operation: %(msg)s")
++
++
++class LVMBackingStoreIsBusy(CinderException):
++    # Backing store can be an LVM 'volume' or a 'snapshot'
++    message = _("The LVM backing store "
++                "%(backing_vol)s is still used by: "
++                "%(procs)s.")
+diff --git a/cinder/opts.py b/cinder/opts.py
+index 5cccaf2..de43c22 100644
+--- a/cinder/opts.py
++++ b/cinder/opts.py
+@@ -278,6 +278,7 @@ def list_opts():
+                 cinder_volume_driver.volume_opts,
+                 cinder_volume_driver.iser_opts,
+                 cinder_volume_manager.volume_manager_opts,
++                cinder_volume_manager.volume_manager_wrs_opts,
+                 cinder_wsgi_eventletserver.socket_opts,
+             )),
+         ('FC-ZONE-MANAGER',
+diff --git a/cinder/scheduler/filter_scheduler.py b/cinder/scheduler/filter_scheduler.py
+index 59c8668..ab8101c 100644
+--- a/cinder/scheduler/filter_scheduler.py
++++ b/cinder/scheduler/filter_scheduler.py
+@@ -105,6 +105,16 @@ class FilterScheduler(driver.Scheduler):
+         # context is not serializable
+         filter_properties.pop('context', None)
+ 
++        LOG.info(("Volume %(volume_id)s is scheduled to create. "
++                  "\n--request_spec: %(request_spec)s, "
++                  "\n--filter_properties: %(filter_properties)s, "
++                  "\n--snapshot_id: %(snapshot_id)s, "
++                  "\n--image_id: %(image_id)s"),
++                 {'volume_id': volume_id,
++                  'request_spec': request_spec,
++                  'filter_properties': filter_properties,
++                  'snapshot_id': request_spec['snapshot_id'],
++                  'image_id': request_spec['image_id']})
+         self.volume_rpcapi.create_volume(context, updated_volume, request_spec,
+                                          filter_properties,
+                                          allow_reschedule=True)
+diff --git a/cinder/scheduler/filters/capacity_filter.py b/cinder/scheduler/filters/capacity_filter.py
+index 9789ea8..c74489e 100644
+--- a/cinder/scheduler/filters/capacity_filter.py
++++ b/cinder/scheduler/filters/capacity_filter.py
+@@ -18,10 +18,14 @@
+ 
+ 
+ import math
++import sys
+ 
++from oslo_db import exception as db_exc
+ from oslo_log import log as logging
+ 
++import cinder.exception as exception
+ from cinder.scheduler import filters
++from cinder.volume import utils as volume_utils
+ 
+ 
+ LOG = logging.getLogger(__name__)
+@@ -67,8 +71,19 @@ class CapacityFilter(filters.BaseBackendFilter):
+ 
+         if backend_state.free_capacity_gb is None:
+             # Fail Safe
+-            LOG.error("Free capacity not set: "
++            errmsg = ("Free capacity not set: "
+                       "volume node info collection broken.")
++            try:
++                volume_utils.update_volume_fault(
++                    filter_properties.get('context'),
++                    filter_properties.get(
++                        'request_spec', {}).get('volume_id', {}),
++                    errmsg, sys.exc_info())
++            except exception.VolumeNotFound:
++                LOG.error("Volume not found")
++            except db_exc.DBError:
++                LOG.error("Database error")
++            LOG.error(errmsg)
+             return False
+ 
+         free_space = backend_state.free_capacity_gb
+@@ -95,12 +110,23 @@ class CapacityFilter(filters.BaseBackendFilter):
+             return False
+         total = float(total_space)
+         if total <= 0:
+-            LOG.warning("Insufficient free space for volume creation. "
+-                        "Total capacity is %(total).2f on %(grouping)s "
+-                        "%(grouping_name)s.",
+-                        {"total": total,
+-                         "grouping": grouping,
+-                         "grouping_name": backend_state.backend_id})
++            errmsg = ("Insufficient free space for volume creation. "
++                      "Total capacity is %(total).2f on %(grouping)s."
++                      "%(grouping_name)s.")
++            msg_args = {"total": total,
++                        "grouping": grouping,
++                        "grouping_name": backend_state.backend_id}
++            try:
++                volume_utils.update_volume_fault(
++                    filter_properties.get('context'),
++                    filter_properties.get(
++                        'request_spec', {}).get('volume_id', {}),
++                    errmsg % msg_args, sys.exc_info())
++            except exception.VolumeNotFound:
++                LOG.error("Volume not found")
++            except db_exc.DBError:
++                LOG.error("Database error")
++            LOG.warning(errmsg, msg_args)
+             return False
+ 
+         # Calculate how much free space is left after taking into account
+@@ -133,12 +159,23 @@ class CapacityFilter(filters.BaseBackendFilter):
+                     "grouping": grouping,
+                     "grouping_name": backend_state.backend_id,
+                 }
+-                LOG.warning(
++                errmsg = (
+                     "Insufficient free space for thin provisioning. "
+                     "The ratio of provisioned capacity over total capacity "
+                     "%(provisioned_ratio).2f has exceeded the maximum over "
+                     "subscription ratio %(oversub_ratio).2f on %(grouping)s "
+-                    "%(grouping_name)s.", msg_args)
++                    "%(grouping_name)s.")
++                try:
++                    volume_utils.update_volume_fault(
++                        filter_properties.get('context'),
++                        filter_properties.get(
++                            'request_spec', {}).get('volume_id', {}),
++                        errmsg % msg_args, sys.exc_info())
++                except exception.VolumeNotFound:
++                    LOG.error("Volume not found")
++                except db_exc.DBError:
++                    LOG.error("Database error")
++                LOG.warning(errmsg, msg_args)
+                 return False
+             else:
+                 # Thin provisioning is enabled and projected over-subscription
+@@ -177,10 +214,20 @@ class CapacityFilter(filters.BaseBackendFilter):
+                     "available": free}
+ 
+         if free < requested_size:
+-            LOG.warning("Insufficient free space for volume creation "
+-                        "on %(grouping)s %(grouping_name)s (requested / "
+-                        "avail): %(requested)s/%(available)s",
+-                        msg_args)
++            errmsg = ("Insufficient free space for volume creation "
++                      "on %(grouping)s %(grouping_name)s (requested / "
++                      "avail): %(requested)s/%(available)s")
++            try:
++                volume_utils.update_volume_fault(
++                    filter_properties.get('context'),
++                    filter_properties.get(
++                        'request_spec', {}).get('volume_id', {}),
++                    errmsg % msg_args, sys.exc_info())
++            except exception.VolumeNotFound:
++                LOG.error("Volume not found")
++            except db_exc.DBError:
++                LOG.error("Database error")
++            LOG.warning(errmsg, msg_args)
+             return False
+ 
+         LOG.debug("Space information for volume creation "
+diff --git a/cinder/service.py b/cinder/service.py
+index bdc53a8..9eaf565 100644
+--- a/cinder/service.py
++++ b/cinder/service.py
+@@ -48,6 +48,8 @@ from cinder import rpc
+ from cinder import version
+ from cinder.volume import utils as vol_utils
+ 
++from sqlalchemy.event import listens_for
++from sqlalchemy.pool import Pool
+ 
+ LOG = logging.getLogger(__name__)
+ 
+@@ -204,6 +206,57 @@ class Service(service.Service):
+         self.backend_rpcserver = None
+         self.cluster_rpcserver = None
+ 
++    # Monitor Sql QueuePool events
++    # associate listener with all instances of Pool
++    # Called at the moment a particular DBAPI connection is first created.
++    @listens_for(Pool, 'connect')
++    def receive_connect(dbapi_connection, connection_record):
++        # this requires property pool_info to be added to _ConnectionRecord
++        if hasattr(connection_record, 'pool_info'):
++            LOG.debug("Create connection %s", connection_record.pool_info)
++        else:
++            LOG.debug("Create %s, %s",
++                      dbapi_connection, connection_record.info)
++
++    # Called when a connection is retrieved from the Pool.
++    @listens_for(Pool, 'checkout')
++    def receive_checkout(dbapi_connection, connection_record,
++                         connection_proxy):
++        if hasattr(connection_record, 'pool_info'):
++            LOG.debug("Checkout connection %s", connection_record.pool_info)
++        else:
++            LOG.debug("Checkout %s, %s",
++                      dbapi_connection, connection_record.info)
++
++    # Called when a connection returns to the pool.
++    @listens_for(Pool, 'checkin')
++    def receive_checkin(dbapi_connection, connection_record):
++        if hasattr(connection_record, 'pool_info'):
++            LOG.debug("Checkin connection %s", connection_record.pool_info)
++        else:
++            LOG.debug("Checkin %s, %s",
++                      dbapi_connection, connection_record.info)
++
++    # Called when a DBAPI connection is to be invalidated.
++    # The event occurs before a final attempt to call .close().
++    @listens_for(Pool, 'invalidate')
++    def receive_invalidate(dbapi_connection, connection_record, exception):
++        if hasattr(connection_record, 'pool_info'):
++            LOG.debug("Invalidate connection %s, exception: %s",
++                      connection_record.pool_info, exception)
++        else:
++            LOG.debug("Invalidate %s, %s, exception: %s",
++                      dbapi_connection, connection_record.info, exception)
++
++    # Called before the reset action occurs for a pooled connection.
++    @listens_for(Pool, 'reset')
++    def receive_reset(dbapi_connection, connection_record):
++        if hasattr(connection_record, 'pool_info'):
++            LOG.debug("Reset connection %s", connection_record.pool_info)
++        else:
++            LOG.debug("Reset %s, %s",
++                      dbapi_connection, connection_record.info)
++
+     def start(self):
+         version_string = version.version_string()
+         LOG.info('Starting %(topic)s node (version %(version_string)s)',
+diff --git a/cinder/tests/unit/api/contrib/test_snapshot_manage.py b/cinder/tests/unit/api/contrib/test_snapshot_manage.py
+index 152db59..5960fab 100644
+--- a/cinder/tests/unit/api/contrib/test_snapshot_manage.py
++++ b/cinder/tests/unit/api/contrib/test_snapshot_manage.py
+@@ -12,6 +12,13 @@
+ #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #   License for the specific language governing permissions and limitations
+ #   under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ import mock
+ from oslo_config import cfg
+@@ -108,8 +115,9 @@ class SnapshotManageTest(test.TestCase):
+ 
+     @mock.patch('cinder.volume.rpcapi.VolumeAPI.manage_existing_snapshot')
+     @mock.patch('cinder.volume.api.API.create_snapshot_in_db')
++    @mock.patch('cinder.db.snapshot_fault_get')
+     @mock.patch('cinder.db.sqlalchemy.api.service_get')
+-    def test_manage_snapshot_ok(self, mock_db,
++    def test_manage_snapshot_ok(self, mock_db, mock_fault,
+                                 mock_create_snapshot, mock_rpcapi):
+         """Test successful manage snapshot execution.
+ 
+@@ -121,6 +129,7 @@ class SnapshotManageTest(test.TestCase):
+         mock_db.return_value = fake_service.fake_service_obj(
+             self._admin_ctxt,
+             binary='cinder-volume')
++        mock_fault.return_value = None
+         body = {'snapshot': {'volume_id': fake.VOLUME_ID, 'ref': 'fake_ref'}}
+         res = self._get_resp_post(body)
+         self.assertEqual(http_client.ACCEPTED, res.status_int, res)
+diff --git a/cinder/tests/unit/api/v1/test_snapshots.py b/cinder/tests/unit/api/v1/test_snapshots.py
+index 549cf7f..194c4d6 100644
+--- a/cinder/tests/unit/api/v1/test_snapshots.py
++++ b/cinder/tests/unit/api/v1/test_snapshots.py
+@@ -229,6 +229,7 @@ class SnapshotApiTest(test.TestCase):
+                 'created_at': None,
+                 'display_name': u'Updated Test Name',
+                 'display_description': u'Default description',
++                'error': '',
+                 'metadata': {},
+             }
+         }
+diff --git a/cinder/tests/unit/api/v1/test_volumes.py b/cinder/tests/unit/api/v1/test_volumes.py
+index 7e38c32..61ff400 100644
+--- a/cinder/tests/unit/api/v1/test_volumes.py
++++ b/cinder/tests/unit/api/v1/test_volumes.py
+@@ -83,6 +83,7 @@ class VolumeApiTest(test.TestCase):
+                                    1900, 1, 1, 1, 1, 1,
+                                    tzinfo=iso8601.iso8601.Utc()),
+                                'size': 100,
++                               'error': '',
+                                'encrypted': False}}
+         self.assertEqual(expected, res_dict)
+ 
+@@ -180,6 +181,7 @@ class VolumeApiTest(test.TestCase):
+                                'created_at': datetime.datetime(
+                                    1900, 1, 1, 1, 1, 1,
+                                    tzinfo=iso8601.iso8601.Utc()),
++                               'error': '',
+                                'size': 1}}
+         body = {"volume": vol}
+         req = fakes.HTTPRequest.blank('/v1/volumes')
+@@ -271,6 +273,7 @@ class VolumeApiTest(test.TestCase):
+             'id': fake.VOLUME_ID,
+             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
+                                             tzinfo=iso8601.iso8601.Utc()),
++            'error': '',
+             'size': 1}}
+         self.assertEqual(expected, res_dict)
+         self.assertEqual(2, len(self.notifier.notifications))
+@@ -306,8 +309,8 @@ class VolumeApiTest(test.TestCase):
+             'id': fake.VOLUME_ID,
+             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
+                                             tzinfo=iso8601.iso8601.Utc()),
+-            'size': 1
+-        }}
++            'error': '',
++            'size': 1}}
+         self.assertEqual(expected, res_dict)
+         self.assertEqual(2, len(self.notifier.notifications))
+ 
+@@ -364,6 +367,7 @@ class VolumeApiTest(test.TestCase):
+             'id': fake.VOLUME_ID,
+             'created_at': datetime.datetime(1900, 1, 1, 1, 1, 1,
+                                             tzinfo=iso8601.iso8601.Utc()),
++            'error': '',
+             'size': 1}}
+         self.assertEqual(expected, res_dict)
+         self.assertEqual(2, len(self.notifier.notifications))
+@@ -421,6 +425,7 @@ class VolumeApiTest(test.TestCase):
+                                  'created_at': datetime.datetime(
+                                      1900, 1, 1, 1, 1, 1,
+                                      tzinfo=iso8601.iso8601.Utc()),
++                                 'error': '',
+                                  'size': 1}]}
+         self.assertEqual(expected, res_dict)
+         # Finally test that we cached the returned volumes
+@@ -470,6 +475,7 @@ class VolumeApiTest(test.TestCase):
+                                  'created_at': datetime.datetime(
+                                      1900, 1, 1, 1, 1, 1,
+                                      tzinfo=iso8601.iso8601.Utc()),
++                                 'error': '',
+                                  'size': 1}]}
+         self.assertEqual(expected, res_dict)
+ 
+@@ -498,6 +504,7 @@ class VolumeApiTest(test.TestCase):
+                                  'created_at': datetime.datetime(
+                                      1900, 1, 1, 1, 1, 1,
+                                      tzinfo=iso8601.iso8601.Utc()),
++                                 'error': '',
+                                  'size': 1}]}
+         self.assertEqual(expected, res_dict)
+         # Finally test that we cached the returned volumes
+@@ -547,6 +554,7 @@ class VolumeApiTest(test.TestCase):
+                                  'created_at': datetime.datetime(
+                                      1900, 1, 1, 1, 1, 1,
+                                      tzinfo=iso8601.iso8601.Utc()),
++                                 'error': '',
+                                  'size': 1}]}
+         self.assertEqual(expected, res_dict)
+ 
+@@ -574,6 +582,7 @@ class VolumeApiTest(test.TestCase):
+                                'created_at': datetime.datetime(
+                                    1900, 1, 1, 1, 1, 1,
+                                    tzinfo=iso8601.iso8601.Utc()),
++                               'error': '',
+                                'size': 1}}
+         self.assertEqual(expected, res_dict)
+         # Finally test that we cached the returned volume
+@@ -615,6 +624,7 @@ class VolumeApiTest(test.TestCase):
+                                'created_at': datetime.datetime(
+                                    1900, 1, 1, 1, 1, 1,
+                                    tzinfo=iso8601.iso8601.Utc()),
++                               'error': '',
+                                'size': 1}}
+ 
+         self.assertEqual(expected, res_dict)
+@@ -701,6 +711,7 @@ class VolumeApiTest(test.TestCase):
+                                'created_at': datetime.datetime(
+                                    1900, 1, 1, 1, 1, 1,
+                                    tzinfo=iso8601.iso8601.Utc()),
++                               'error': '',
+                                'size': 1}}
+         self.assertEqual(expected, res_dict)
+ 
+diff --git a/cinder/tests/unit/api/v2/test_snapshots.py b/cinder/tests/unit/api/v2/test_snapshots.py
+index be35d39..8f2e12e 100644
+--- a/cinder/tests/unit/api/v2/test_snapshots.py
++++ b/cinder/tests/unit/api/v2/test_snapshots.py
+@@ -231,6 +231,7 @@ class SnapshotApiTest(test.TestCase):
+                 'name': u'Updated Test Name',
+                 'description': u'Default description',
+                 'metadata': {},
++                'error': '',
+             }
+         }
+         self.assertEqual(expected, res_dict)
+diff --git a/cinder/tests/unit/api/v2/test_volumes.py b/cinder/tests/unit/api/v2/test_volumes.py
+index d6756ef..27c68be 100644
+--- a/cinder/tests/unit/api/v2/test_volumes.py
++++ b/cinder/tests/unit/api/v2/test_volumes.py
+@@ -209,7 +209,8 @@ class VolumeApiTest(test.TestCase):
+                    'status': status,
+                    'user_id': fake.USER_ID,
+                    'volume_type': volume_type,
+-                   'encrypted': False}}
++                   'encrypted': False,
++                   'error': ''}}
+ 
+         if with_migration_status:
+             volume['volume']['migration_status'] = None
+diff --git a/cinder/tests/unit/api/v3/test_snapshot_manage.py b/cinder/tests/unit/api/v3/test_snapshot_manage.py
+index 21f3fc1..2c1b4e6 100644
+--- a/cinder/tests/unit/api/v3/test_snapshot_manage.py
++++ b/cinder/tests/unit/api/v3/test_snapshot_manage.py
+@@ -65,8 +65,9 @@ class SnapshotManageTest(test.TestCase):
+ 
+     @mock.patch('cinder.volume.rpcapi.VolumeAPI.manage_existing_snapshot')
+     @mock.patch('cinder.volume.api.API.create_snapshot_in_db')
++    @mock.patch('cinder.db.snapshot_fault_get')
+     @mock.patch('cinder.objects.service.Service.get_by_id')
+-    def test_manage_snapshot_route(self, mock_service_get,
++    def test_manage_snapshot_route(self, mock_service_get, mock_fault,
+                                    mock_create_snapshot, mock_rpcapi):
+         """Test call to manage snapshot.
+ 
+@@ -77,6 +78,7 @@ class SnapshotManageTest(test.TestCase):
+         mock_service_get.return_value = fake_service.fake_service_obj(
+             self._admin_ctxt,
+             binary='cinder-volume')
++        mock_fault.return_value = None
+ 
+         body = {'snapshot': {'volume_id': fake.VOLUME_ID, 'ref': 'fake_ref'}}
+         res = self._get_resp_post(body)
+diff --git a/cinder/tests/unit/api/v3/test_volumes.py b/cinder/tests/unit/api/v3/test_volumes.py
+index d039a31..1d47062 100644
+--- a/cinder/tests/unit/api/v3/test_volumes.py
++++ b/cinder/tests/unit/api/v3/test_volumes.py
+@@ -329,7 +329,8 @@ class VolumeApiTest(test.TestCase):
+                    'status': status,
+                    'user_id': fake.USER_ID,
+                    'volume_type': volume_type,
+-                   'encrypted': False}}
++                   'encrypted': False,
++                   'error': ''}}
+ 
+         if with_migration_status:
+             volume['volume']['migration_status'] = None
+diff --git a/cinder/tests/unit/objects/test_snapshot.py b/cinder/tests/unit/objects/test_snapshot.py
+index c0d4622..88b7d95 100644
+--- a/cinder/tests/unit/objects/test_snapshot.py
++++ b/cinder/tests/unit/objects/test_snapshot.py
+@@ -60,7 +60,7 @@ class TestSnapshot(test_objects.BaseObjectsTestCase):
+ 
+     @mock.patch('cinder.db.sqlalchemy.api.model_query')
+     def test_get_by_id_no_existing_id(self, model_query):
+-        query = model_query().options().options().filter_by().first
++        query = model_query().options().options().options().filter_by().first
+         query.return_value = None
+         self.assertRaises(exception.SnapshotNotFound,
+                           objects.Snapshot.get_by_id, self.context, 123)
+diff --git a/cinder/tests/unit/objects/test_volume.py b/cinder/tests/unit/objects/test_volume.py
+index 6aceea4..d7e6347 100644
+--- a/cinder/tests/unit/objects/test_volume.py
++++ b/cinder/tests/unit/objects/test_volume.py
+@@ -49,7 +49,7 @@ class TestVolume(test_objects.BaseObjectsTestCase):
+     @mock.patch('cinder.db.sqlalchemy.api.model_query')
+     def test_get_by_id_no_existing_id(self, model_query):
+         pf = (model_query().options().options().options().options().options().
+-              options())
++              options().options())
+         pf.filter_by().first.return_value = None
+         self.assertRaises(exception.VolumeNotFound,
+                           objects.Volume.get_by_id, self.context, 123)
+diff --git a/cinder/tests/unit/scheduler/test_host_filters.py b/cinder/tests/unit/scheduler/test_host_filters.py
+index c9f60d6..333fa5e 100644
+--- a/cinder/tests/unit/scheduler/test_host_filters.py
++++ b/cinder/tests/unit/scheduler/test_host_filters.py
+@@ -101,6 +101,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
++                             'context': self.context.elevated(),
+                              'request_spec': {'volume_id': fake.VOLUME_ID}}
+         service = {'disabled': False}
+         host = fakes.FakeBackendState('host1',
+@@ -111,8 +112,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_fails_free_capacity_None(self, _mock_serv_is_up):
+-        _mock_serv_is_up.return_value = True
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_fails_free_capacity_None(self, _mock_update_vol_fault,
++                                             _mock_serv_is_up):
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
+                              'request_spec': {'volume_id': fake.VOLUME_ID}}
+@@ -166,7 +168,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_extend_request_negative(self, _mock_serv_is_up):
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_extend_request_negative(self, _mock_update_vol_fault,
++                                            _mock_serv_is_up):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 50,
+@@ -219,7 +223,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertTrue(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_fails_total_infinite(self, _mock_serv_is_up):
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_fails_total_infinite(self, _mock_update_vol_fault,
++                                         _mock_serv_is_up):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
+@@ -232,7 +238,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_fails_total_unknown(self, _mock_serv_is_up):
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_fails_total_unknown(self, _mock_update_vol_fault,
++                                        _mock_serv_is_up):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
+@@ -245,7 +253,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_fails_total_zero(self, _mock_serv_is_up):
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_fails_total_zero(self, _mock_update_vol_fault,
++                                     _mock_serv_is_up):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
+@@ -330,6 +340,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 200,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> True',
+                              'capabilities:thick_provisioning_support':
+@@ -348,7 +359,9 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+                                        'service': service})
+         self.assertFalse(filt_cls.backend_passes(host, filter_properties))
+ 
+-    def test_filter_over_subscription_equal_to_1(self, _mock_serv_is_up):
++    @mock.patch('cinder.volume.utils.update_volume_fault')
++    def test_filter_over_subscription_equal_to_1(self, _mock_update_vol_fault,
++                                                 _mock_serv_is_up):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 150,
+@@ -374,6 +387,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> True',
+                              'capabilities:thick_provisioning_support':
+@@ -396,6 +410,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 2000,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> True',
+                              'capabilities:thick_provisioning_support':
+@@ -418,6 +433,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> True',
+                              'capabilities:thick_provisioning_support':
+@@ -440,6 +456,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> False',
+                              'capabilities:thick_provisioning_support':
+@@ -530,6 +547,7 @@ class CapacityFilterTestCase(BackendFiltersTestCase):
+         _mock_serv_is_up.return_value = True
+         filt_cls = self.class_map['CapacityFilter']()
+         filter_properties = {'size': 100,
++                             'context': self.context.elevated(),
+                              'capabilities:thin_provisioning_support':
+                                  '<is> True',
+                              'capabilities:thick_provisioning_support':
+diff --git a/cinder/volume/flows/manager/create_volume.py b/cinder/volume/flows/manager/create_volume.py
+index feacec4..5c3c944 100644
+--- a/cinder/volume/flows/manager/create_volume.py
++++ b/cinder/volume/flows/manager/create_volume.py
+@@ -11,6 +11,8 @@
+ #    under the License.
+ 
+ import os
++import six
++import sys
+ import traceback
+ 
+ from oslo_concurrency import processutils
+@@ -37,6 +39,12 @@ from cinder import utils
+ from cinder.volume.flows import common
+ from cinder.volume import utils as volume_utils
+ 
++try:
++    import rbd
++except ImportError:
++    rbd = None
++
++
+ LOG = logging.getLogger(__name__)
+ 
+ ACTION = 'volume:create'
+@@ -530,10 +538,10 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+ 
+         image_id = image_meta['id']
+         """Downloads Glance image to the specified volume."""
+-        LOG.debug("Attempting download of %(image_id)s (%(image_location)s)"
+-                  " to volume %(volume_id)s.",
+-                  {'image_id': image_id, 'volume_id': volume.id,
+-                   'image_location': image_location})
++        LOG.info("Attempting download of %(image_id)s (%(image_location)s)"
++                 " to volume %(volume_id)s.",
++                 {'image_id': image_id, 'volume_id': volume.id,
++                  'image_location': image_location})
+         try:
+             image_properties = image_meta.get('properties', {})
+             image_encryption_key = image_properties.get(
+@@ -554,13 +562,23 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+                 self.driver.copy_image_to_volume(
+                     context, volume, image_service, image_id)
+         except processutils.ProcessExecutionError as ex:
+-            LOG.exception("Failed to copy image %(image_id)s to volume: "
+-                          "%(volume_id)s",
+-                          {'volume_id': volume.id, 'image_id': image_id})
++            errmsg = ("Failed to copy image %(image_id)s to volume: "
++                      "%(volume_id)s, error: %(error)s")
++            msg_args = {'volume_id': volume.id,
++                        'error': ex.stderr,
++                        'image_id': image_id}
++            LOG.error(errmsg, msg_args)
++            volume_utils.update_volume_fault(context, volume.id, errmsg,
++                                             sys.exc_info())
+             raise exception.ImageCopyFailure(reason=ex.stderr)
+         except exception.ImageUnacceptable as ex:
+-            LOG.exception("Failed to copy image to volume: %(volume_id)s",
+-                          {'volume_id': volume.id})
++            errmsg = ("Failed to copy image to volume: %(volume_id)s, "
++                      "error: %(error)s")
++            msg_args = {'volume_id': volume.id,
++                        'error': ex}
++            LOG.error(errmsg, msg_args)
++            volume_utils.update_volume_fault(context, volume.id, errmsg,
++                                             sys.exc_info())
+             raise exception.ImageUnacceptable(ex)
+         except exception.ImageTooBig as ex:
+             LOG.exception("Failed to copy image %(image_id)s to volume: "
+@@ -568,18 +586,22 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+                           {'volume_id': volume.id, 'image_id': image_id})
+             excutils.save_and_reraise_exception()
+         except Exception as ex:
+-            LOG.exception("Failed to copy image %(image_id)s to "
+-                          "volume: %(volume_id)s",
+-                          {'volume_id': volume.id, 'image_id': image_id})
++            errmsg = ("Failed to copy image %(image_id)s to "
++                      "volume: %(volume_id)s, error: %(error)s")
++            msg_args = {'volume_id': volume.id, 'error': ex,
++                        'image_id': image_id}
++            LOG.error(errmsg, msg_args)
++            volume_utils.update_volume_fault(context, volume.id, errmsg,
++                                             sys.exc_info())
+             if not isinstance(ex, exception.ImageCopyFailure):
+                 raise exception.ImageCopyFailure(reason=ex)
+             else:
+                 raise
+ 
+-        LOG.debug("Downloaded image %(image_id)s (%(image_location)s)"
+-                  " to volume %(volume_id)s successfully.",
+-                  {'image_id': image_id, 'volume_id': volume.id,
+-                   'image_location': image_location})
++        LOG.info(("Downloaded image %(image_id)s (%(image_location)s)"
++                  " to volume %(volume_id)s successfully."),
++                 {'image_id': image_id, 'volume_id': volume.id,
++                  'image_location': image_location})
+ 
+     def _capture_volume_image_metadata(self, context, volume_id,
+                                        image_id, image_meta):
+@@ -833,10 +855,10 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+     def _create_from_image(self, context, volume,
+                            image_location, image_id, image_meta,
+                            image_service, **kwargs):
+-        LOG.debug("Cloning %(volume_id)s from image %(image_id)s "
+-                  " at location %(image_location)s.",
+-                  {'volume_id': volume.id,
+-                   'image_location': image_location, 'image_id': image_id})
++        LOG.info("Cloning %(volume_id)s from image %(image_id)s "
++                 " at location %(image_location)s.",
++                 {'volume_id': volume.id,
++                  'image_location': image_location, 'image_id': image_id})
+ 
+         # NOTE(e0ne): check for free space in image_conversion_dir before
+         # image downloading.
+@@ -900,13 +922,27 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+ 
+         # Try and use the image cache, and download if not cached.
+         if not cloned:
+-            model_update = self._create_from_image_cache_or_download(
+-                context,
+-                volume,
+-                image_location,
+-                image_id,
+-                image_meta,
+-                image_service)
++            try:
++                model_update = self._create_from_image_cache_or_download(
++                    context,
++                    volume,
++                    image_location,
++                    image_id,
++                    image_meta,
++                    image_service)
++            except Exception as e:
++                # Log generic exception, update volume fault and
++                # re-raise exception
++                errmsg = ("Error creating volume. "
++                          " Message from driver: %s")
++                msg_args = six.text_type(e)
++                LOG.error(errmsg, msg_args)
++                volume_utils.update_volume_fault(
++                    context,
++                    volume.id,
++                    errmsg,
++                    sys.exc_info())
++                raise
+ 
+         self._handle_bootable_volume_glance_meta(context, volume,
+                                                  image_id=image_id,
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index 400cc6e..3b56e42 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -14,7 +14,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2014 Wind River Systems, Inc.
++# Copyright (c) 2014-2016 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -42,7 +42,7 @@ intact.
+ 
+ """
+ 
+-
++import os.path
+ import requests
+ import time
+ 
+@@ -151,9 +151,17 @@ volume_backend_opts = [
+                 help='Suppress requests library SSL certificate warnings.'),
+ ]
+ 
++volume_manager_wrs_opts = [
++    cfg.StrOpt('in_service_marker',
++               default='/run/patching/patch-flags/cinder.restarting',
++               help='File used for detecting if we are doing '
++                    'in-service patching'),
++]
++
+ CONF = cfg.CONF
+ CONF.register_opts(volume_manager_opts)
+ CONF.register_opts(volume_backend_opts, group=config.SHARED_CONF_GROUP)
++CONF.register_opts(volume_manager_wrs_opts)
+ 
+ MAPPING = {
+     'cinder.volume.drivers.hds.nfs.HDSNFSDriver':
+@@ -541,6 +549,20 @@ class VolumeManager(manager.CleanableManager,
+ 
+     def _do_cleanup(self, ctxt, vo_resource):
+         if isinstance(vo_resource, objects.Volume):
++            if vo_resource.status in ('downloading', 'creating'):
++                # WRS: Check if error was caused by in-service patching
++                if os.path.isfile(CONF.in_service_marker):
++                    # In-service patching may cause volumes to fail
++                    # so we set a correct error message
++                    errmsg = ("Volume creation failed. In-service "
++                              "patching in progress, please retry "
++                              "after maintenance operation is complete.")
++                else:
++                    errmsg = ("Volume creation failed. Cinder-volume "
++                              "service restarted during volume creation.")
++                vol_utils.update_volume_fault(
++                    ctxt, vo_resource.id, errmsg)
++
+             if vo_resource.status == 'downloading':
+                 self.driver.clear_download(ctxt, vo_resource)
+ 
+@@ -779,7 +801,15 @@ class VolumeManager(manager.CleanableManager,
+                 LOG.debug('Snapshots deleted, issuing volume delete')
+                 self.driver.delete_volume(volume)
+             else:
+-                self.driver.delete_volume(volume)
++                try:
++                    self.driver.delete_volume(volume)
++                except exception.LVMBackingStoreIsBusy as ex:
++                    ex.msg = (_("Error deleting volume. %s")
++                              % six.text_type(ex.msg))
++                    vol_utils.update_volume_fault(context,
++                                                  volume.id,
++                                                  ex.msg)
++                    raise
+         except exception.VolumeIsBusy:
+             LOG.error("Unable to delete busy volume.",
+                       resource=volume)
+@@ -787,8 +817,15 @@ class VolumeManager(manager.CleanableManager,
+             # record to avoid user confusion.
+             self._clear_db(context, is_migrating_dest, volume,
+                            'available')
++
++            vol_utils.update_volume_fault(
++                context,
++                volume.id,
++                _("Delete failed at %s UTC. Reason: Unable to delete busy "
++                  "volume.") % (str(timeutils.utcnow())))
++
+             return
+-        except Exception:
++        except Exception as e:
+             with excutils.save_and_reraise_exception():
+                 # If this is a destination volume, we have to clear the
+                 # database record to avoid user confusion.
+@@ -799,6 +836,16 @@ class VolumeManager(manager.CleanableManager,
+                 self._clear_db(context, is_migrating_dest, volume,
+                                new_status)
+ 
++                if hasattr(e, 'stderr'):
++                    reason = e.stderr
++                else:
++                    reason = six.text_type(e)
++                errmsg = "Delete failed at %s UTC. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                vol_utils.update_volume_fault(context,
++                                              volume.id,
++                                              errmsg)
++
+         # If deleting source/destination volume in a migration, we should
+         # skip quotas.
+         if not is_migrating:
+@@ -1037,10 +1084,14 @@ class VolumeManager(manager.CleanableManager,
+                 snapshot.update(model_update)
+                 snapshot.save()
+ 
+-        except Exception:
++        except Exception as e:
+             with excutils.save_and_reraise_exception():
+                 snapshot.status = fields.SnapshotStatus.ERROR
+                 snapshot.save()
++                vol_utils.update_snapshot_fault(
++                    context, snapshot.id,
++                    e.msg if hasattr(e, 'msg') else e.message,
++                    None)
+ 
+         vol_ref = self.db.volume_get(context, snapshot.volume_id)
+         if vol_ref.bootable:
+@@ -1060,6 +1111,12 @@ class VolumeManager(manager.CleanableManager,
+                               resource=snapshot)
+                 snapshot.status = fields.SnapshotStatus.ERROR
+                 snapshot.save()
++                vol_utils.update_snapshot_fault(
++                    context, snapshot.id,
++                    ("Failed updating snapshot using "
++                     "volume %(volume_id)s metadata") % {
++                        'volume_id': snapshot.volume_id},
++                    None)
+                 raise exception.MetadataCopyFailure(reason=six.text_type(ex))
+ 
+         snapshot.status = fields.SnapshotStatus.AVAILABLE
+@@ -1096,18 +1153,44 @@ class VolumeManager(manager.CleanableManager,
+             if unmanage_only:
+                 self.driver.unmanage_snapshot(snapshot)
+             else:
+-                self.driver.delete_snapshot(snapshot)
++                try:
++                    self.driver.delete_snapshot(snapshot)
++                except exception.LVMBackingStoreIsBusy as ex:
++                    ex.msg = (_("Error deleting snapshot. %s")
++                              % six.text_type(ex.msg))
++                    vol_utils.update_snapshot_fault(context,
++                                                    snapshot.id,
++                                                    ex.msg)
++                    raise
++
+         except exception.SnapshotIsBusy:
+             LOG.error("Delete snapshot failed, due to snapshot busy.",
+                       resource=snapshot)
+             snapshot.status = fields.SnapshotStatus.AVAILABLE
+             snapshot.save()
++
++            vol_utils.update_snapshot_fault(
++                context,
++                snapshot.id,
++                _("Delete failed at %s UTC. Reason: Unable to delete busy "
++                  "snapshot.") % (str(timeutils.utcnow())))
+             return
+-        except Exception:
++        except Exception as error:
+             with excutils.save_and_reraise_exception():
+                 snapshot.status = fields.SnapshotStatus.ERROR_DELETING
+                 snapshot.save()
+ 
++                if hasattr(error, 'stderr'):
++                    reason = error.stderr
++                else:
++                    reason = six.text_type(error)
++                errmsg = "Delete failed at %s UTC. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                vol_utils.update_snapshot_fault(context,
++                                                snapshot.id,
++                                                errmsg)
++            return
++
+         # Get reservations
+         reservations = None
+         try:
+@@ -1216,6 +1299,7 @@ class VolumeManager(manager.CleanableManager,
+                                       instance_uuid,
+                                       host_name_sanitized,
+                                       mountpoint)
++            LOG.info("Volume %s attached by driver", volume_id)
+         except Exception as excep:
+             with excutils.save_and_reraise_exception():
+                 self.message_api.create(
+@@ -1298,6 +1382,7 @@ class VolumeManager(manager.CleanableManager,
+                       'instance': attachment.get('instance_uuid')},
+                      resource=volume)
+             self.driver.detach_volume(context, volume, attachment)
++            LOG.info("Volume %s detached by driver", volume_id)
+         except Exception:
+             with excutils.save_and_reraise_exception():
+                 self.db.volume_attachment_update(
+@@ -2322,9 +2407,16 @@ class VolumeManager(manager.CleanableManager,
+         if not force_host_copy and new_type_id is None:
+             try:
+                 LOG.debug("Issue driver.migrate_volume.", resource=volume)
+-                moved, model_update = self.driver.migrate_volume(ctxt,
+-                                                                 volume,
+-                                                                 host)
++                try:
++                    moved, model_update = self.driver.migrate_volume(ctxt,
++                                                                     volume,
++                                                                     host)
++                except exception.LVMBackingStoreIsBusy as ex:
++                    ex.msg = (_("Error migrating volume. %s")
++                              % six.text_type(ex.msg))
++                    vol_utils.update_volume_fault(context, volume.id, ex.msg)
++                    raise
++
+                 if moved:
+                     updates = {'host': host['host'],
+                                'cluster_name': host.get('cluster_name'),
+diff --git a/cinder/volume/targets/iscsi.py b/cinder/volume/targets/iscsi.py
+index 4904ebe..ebae5d2 100644
+--- a/cinder/volume/targets/iscsi.py
++++ b/cinder/volume/targets/iscsi.py
+@@ -213,12 +213,17 @@ class ISCSITarget(driver.Target):
+ 
+         # NOTE(jdg): For TgtAdm case iscsi_name is the ONLY param we need
+         # should clean this all up at some point in the future
++        LOG.info(("Creating volume export for %(uuid)s target:%(target)s "
++                  "lun:%(lun)s path:%(volume_path)s"),
++                 {"uuid": volume['id'], "target": iscsi_target, "lun": lun,
++                  "volume_path": volume_path})
+         tid = self.create_iscsi_target(iscsi_name,
+                                        iscsi_target,
+                                        lun,
+                                        volume_path,
+                                        chap_auth,
+                                        **portals_config)
++        LOG.info("Volume export for %s created", volume['id'])
+         data = {}
+         data['location'] = self._iscsi_location(
+             self.configuration.iscsi_ip_address, tid, iscsi_name, lun,
+@@ -252,8 +257,12 @@ class ISCSITarget(driver.Target):
+             return
+ 
+         # NOTE: For TgtAdm case volume['id'] is the ONLY param we need
++        LOG.info(("Removing volume export for %(name)s target:%(target) "
++                  "lun:%(lun)s"),
++                 {"name": volume['id'], "target": iscsi_target, "lun": lun})
+         self.remove_iscsi_target(iscsi_target, lun, volume['id'],
+                                  volume['name'])
++        LOG.info("Volume export for %s removed", volume['id'])
+ 
+     def ensure_export(self, context, volume, volume_path):
+         """Recreates an export for a logical volume."""
+@@ -278,10 +287,15 @@ class ISCSITarget(driver.Target):
+         portals_config = self._get_portals_config()
+ 
+         iscsi_target, lun = self._get_target_and_lun(context, volume)
++        LOG.info(("Recreating volume export for %(uuid)s target:%(target) "
++                  "lun:%(lun)s path:%(volume_path)s"),
++                 {"uuid": volume['id'], "target": iscsi_target, "lun": lun,
++                  "volume_path": volume_path})
+         self.create_iscsi_target(
+             iscsi_name, iscsi_target, lun, volume_path,
+             chap_auth, check_exit_code=False,
+             old_name=None, **portals_config)
++        LOG.info("Volume export for %s created", volume['id'])
+ 
+     def initialize_connection(self, volume, connector):
+         """Initializes the connection and returns connection info.
+diff --git a/cinder/volume/targets/lio.py b/cinder/volume/targets/lio.py
+index 37d3269..bd01633 100644
+--- a/cinder/volume/targets/lio.py
++++ b/cinder/volume/targets/lio.py
+@@ -159,6 +159,9 @@ class LioAdm(iscsi.ISCSITarget):
+ 
+         # We make changes persistent
+         self._persist_configuration(vol_id)
++        LOG.info(('Finished creating iscsi_target for volume: %(id)s '
++                  'at: %(target)s'),
++                 {"id": vol_id, "target": iqn})
+ 
+     def initialize_connection(self, volume, connector):
+         volume_iqn = volume['provider_location'].split(' ')[1]
+@@ -167,6 +170,9 @@ class LioAdm(iscsi.ISCSITarget):
+             volume['provider_auth'].split(' ', 3)
+ 
+         # Add initiator iqns to target ACL
++        LOG.info(('Exporting iscsi initiator: %(initiator)s '
++                  'for volume: %(id)s'),
++                 {"initiator": connector['initiator'], "id": volume["id"]})
+         try:
+             self._execute('cinder-rtstool', 'add-initiator',
+                           volume_iqn,
+@@ -183,7 +189,10 @@ class LioAdm(iscsi.ISCSITarget):
+         # We make changes persistent
+         self._persist_configuration(volume['id'])
+ 
+-        return super(LioAdm, self).initialize_connection(volume, connector)
++        ret = super(LioAdm, self).initialize_connection(volume, connector)
++        LOG.info(('Exported iscsi initiator for'
++                  ' volume: %s'), volume["id"])
++        return ret
+ 
+     def terminate_connection(self, volume, connector, **kwargs):
+         if volume['provider_location'] is None:
+@@ -194,6 +203,9 @@ class LioAdm(iscsi.ISCSITarget):
+         volume_iqn = volume['provider_location'].split(' ')[1]
+ 
+         # Delete initiator iqns from target ACL
++        LOG.info(('Terminating iscsi initiator: %(initiator)s '
++                  'for volume: %(id)s'),
++                 {"initiator": volume_iqn, "id": volume["id"]})
+         try:
+             self._execute('cinder-rtstool', 'delete-initiator',
+                           volume_iqn,
+@@ -207,6 +219,8 @@ class LioAdm(iscsi.ISCSITarget):
+ 
+         # We make changes persistent
+         self._persist_configuration(volume['id'])
++        LOG.info(('Terminated iscsi initiator '
++                  'for volume: %s'), volume["id"])
+ 
+     def ensure_export(self, context, volume, volume_path):
+         """Recreate exports for logical volumes."""
+diff --git a/cinder/volume/targets/tgt.py b/cinder/volume/targets/tgt.py
+index b54a7a8..a708a81 100644
+--- a/cinder/volume/targets/tgt.py
++++ b/cinder/volume/targets/tgt.py
+@@ -155,7 +155,7 @@ class TgtAdm(iscsi.ISCSITarget):
+             'chap_auth': chap_str, 'target_flags': target_flags,
+             'write_cache': write_cache}
+ 
+-        LOG.debug('Creating iscsi_target for Volume ID: %s', vol_id)
++        LOG.info('Creating iscsi_target for Volume ID: %s', vol_id)
+         volumes_dir = self.volumes_dir
+         volume_path = os.path.join(volumes_dir, vol_id)
+ 
+@@ -287,7 +287,7 @@ class TgtAdm(iscsi.ISCSITarget):
+         # if it wasn't, try again without the force.
+ 
+         # This will NOT do any good for the case of mutliple sessions
+-        # which the force was aded for but it will however address
++        # which the force was added for but it will however address
+         # the cases pointed out in bug:
+         #    https://bugs.launchpad.net/cinder/+bug/1304122
+         if self._get_target(iqn):
+@@ -313,3 +313,6 @@ class TgtAdm(iscsi.ISCSITarget):
+         else:
+             LOG.debug('Volume path %s not found at end, '
+                       'of remove_iscsi_target.', volume_path)
++
++        LOG.info('Removed iscsi_target successfully for Volume ID: %s',
++                 vol_id)
+diff --git a/cinder/volume/utils.py b/cinder/volume/utils.py
+index 3f556a5..8e42ebe 100644
+--- a/cinder/volume/utils.py
++++ b/cinder/volume/utils.py
+@@ -11,6 +11,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """Volume-related Utilities and helpers."""
+ 
+@@ -23,6 +30,7 @@ import operator
+ from os import urandom
+ import re
+ import time
++import traceback
+ import uuid
+ 
+ import eventlet
+@@ -935,3 +943,62 @@ def is_group_a_type(group, key):
+         )
+         return spec == "<is> True"
+     return False
++
++
++# WRS-extend
++def update_volume_fault(context, volume_id, message, exc_info=None):
++    """Adds the specified fault to the database."""
++
++    details = ''
++    if exc_info:
++        tb = exc_info[2]
++        if tb:
++            details = ''.join(traceback.format_tb(tb))
++
++    # Max message size in DB is 255.
++    # Truncate to 250 and add .. if message longer than 250
++    msg = (message[:250] + '..') if len(message) > 250 else message
++    values = {'message': msg, 'details': six.text_type(details)}
++    try:
++        db.volume_fault_update(context, volume_id, values)
++    except exception.VolumeNotFound:
++        pass
++
++
++# WRS-extend
++def get_volume_fault(context, volume_id):
++    """get fault from the database."""
++
++    try:
++        fault = db.volume_fault_get(context, volume_id)
++    except exception.VolumeNotFound:
++        fault = None
++    return fault
++
++
++def update_snapshot_fault(context, snapshot_id, message, exc_info=None):
++    """Adds the specified fault to the database."""
++
++    details = ''
++    if exc_info:
++        tb = exc_info[2]
++        if tb:
++            details = ''.join(traceback.format_tb(tb))
++
++    # Max message size in DB is 255.
++    # Truncate to 250 and add .. if message longer than 250
++    msg = (message[:250] + '..') if len(message) > 250 else message
++    values = {'message': msg, 'details': six.text_type(details)}
++    try:
++        db.snapshot_fault_update(context, snapshot_id, values)
++    except exception.SnapshotNotFound:
++        pass
++
++
++def get_snapshot_fault(context, snapshot_id):
++    """get fault from the database."""
++    try:
++        fault = db.snapshot_fault_get(context, snapshot_id)
++    except exception.SnapshotNotFound:
++        fault = None
++    return fault
+-- 
+2.7.4
+

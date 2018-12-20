@@ -1,0 +1,39 @@
+From 76f06a93d8cd3e8000eb3c57ef42ff6efe92ed7f Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Wed, 13 Dec 2017 19:29:58 +0000
+Subject: [PATCH 40/53] Pike Rebase: LVM thin provisioning allocation checks -
+ Unit Test fix
+
+---
+ cinder/tests/unit/volume/drivers/test_lvm_driver.py | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/cinder/tests/unit/volume/drivers/test_lvm_driver.py b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+index 19a455d..4118bec 100644
+--- a/cinder/tests/unit/volume/drivers/test_lvm_driver.py
++++ b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+@@ -243,7 +243,20 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+                                                    snapshot_ref)
+             mock_extend.assert_called_with(dst_volume, dst_volume['size'])
+ 
+-    def test_snapshot_over_subscription(self):
++    @mock.patch.object(brick_lvm.LVM, 'get_volumes',
++                       return_value=[{'vg': 'fake_vg', 'name': 'fake_vol',
++                                      'size': '1000'}])
++    @mock.patch.object(brick_lvm.LVM, 'get_all_physical_volumes')
++    @mock.patch.object(brick_lvm.LVM, 'get_all_volume_groups',
++                       return_value=[{'name': 'cinder-volumes',
++                                      'size': '5.52',
++                                      'available': '0.52',
++                                      'lv_count': '2',
++                                      'uuid': 'vR1JU3-FAKE-C4A9-PQFh-Mctm'}])
++    @mock.patch('cinder.brick.local_dev.lvm.LVM.get_lvm_version',
++                return_value=(2, 2, 100))
++    def test_snapshot_over_subscription(self, _mock_get_version, mock_vgs,
++                                        mock_pvs, mock_get_volumes):
+ 
+         self.configuration.lvm_type = 'thin'
+         self.configuration.max_over_subscription_ratio = 1
+-- 
+2.7.4
+

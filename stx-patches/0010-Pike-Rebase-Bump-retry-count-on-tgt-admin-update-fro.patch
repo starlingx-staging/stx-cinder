@@ -1,0 +1,48 @@
+From 73d5dad4892ab6ddb2548b83a51ca4c9cece4cad Mon Sep 17 00:00:00 2001
+From: Robert Church <robert.church@windriver.com>
+Date: Mon, 2 May 2016 11:48:53 -0500
+Subject: [PATCH 10/53] Pike Rebase: Bump retry count on tgt-admin update from
+ 3 to 6
+
+With Cinder under a heavy load where we have multiple volume
+attaches/detaches occurring at the same time, there is a race condition
+that occurs with the tgt-admin script that will produce the same target
+ID (tid) for multiple volumes.
+
+Upstream, the solution to avoid this scenario is to add a retry
+mechanism around this call to tgt-admin until it is successfully run.
+The default number of retries is three. Three retries has proven to be
+insufficient for Nokia stress testing scenarios. By bumping the number
+of retries from 3 to 6 we provide enough opportunities for successful
+execution.
+
+This change mitigates the current failure scenario and provides improved
+reliability until a solution to avoid the race condition is determined.
+
+NOTE: This change is to enable patch-back of this functionality to TiS
+Release 2 (15.12). In Release 3 we have migrated from TGT to LIO for
+iSCSI volume attachments. This change is no longer testable in the
+Release 3 stream.
+
+(cherry picked from commit fb3fdb968d9b98d82d57ce1f67303bcebd6f339c)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/volume/targets/tgt.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/cinder/volume/targets/tgt.py b/cinder/volume/targets/tgt.py
+index a708a81..8535e41 100644
+--- a/cinder/volume/targets/tgt.py
++++ b/cinder/volume/targets/tgt.py
+@@ -110,7 +110,7 @@ class TgtAdm(iscsi.ISCSITarget):
+         iscsi_target = 0  # NOTE(jdg): Not used by tgtadm
+         return iscsi_target, lun
+ 
+-    @utils.retry(putils.ProcessExecutionError)
++    @utils.retry(putils.ProcessExecutionError, retries=6)
+     def _do_tgt_update(self, name):
+         (out, err) = utils.execute('tgt-admin', '--update', name,
+                                    run_as_root=True)
+-- 
+2.7.4
+

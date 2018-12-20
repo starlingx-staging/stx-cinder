@@ -1,0 +1,44 @@
+From ece67bd26681c5603886bfd6177742e97e7a9ca1 Mon Sep 17 00:00:00 2001
+From: Wen Shi <wen.shi@windriver.com>
+Date: Wed, 7 Feb 2018 15:56:25 -0600
+Subject: [PATCH 48/53] Update cinder config again to support tox coverage
+
+---
+ .coveragerc | 2 +-
+ tox.ini     | 3 +--
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/.coveragerc b/.coveragerc
+index 9e7882a..4bde2f7 100644
+--- a/.coveragerc
++++ b/.coveragerc
+@@ -1,7 +1,7 @@
+ [run]
+ branch = True
+ source = cinder
+-omit = cinder/tests/*
++#omit = cinder/tests/*
+ 
+ [report]
+ ignore_errors = True
+diff --git a/tox.ini b/tox.ini
+index 117edfa..e6fde27 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -77,12 +77,11 @@ setenv =
+   VIRTUAL_ENV={envdir}
+   PYTHONHASHSEED=0
+   PYTHONWARNINGS=default::DeprecationWarning
+-  PYTHON=coverage run --source cinder/tests/unit --omit .*test.*coverage.* --parallel-mode
++  PYTHON=coverage run  --omit .*test.*coverage.*
+ 
+ commands =
+   coverage erase
+   ostestr {posargs}
+-  coverage combine
+   coverage html -d cover
+   coverage xml
+ 
+-- 
+2.7.4
+

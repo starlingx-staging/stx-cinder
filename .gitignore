@@ -38,3 +38,4 @@ api-ref/build
 
 # Files created by releasenotes build
 releasenotes/build
+stx-patches

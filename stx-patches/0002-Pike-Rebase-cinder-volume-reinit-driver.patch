@@ -1,0 +1,105 @@
+From e2acfff036c474827b7785a00d1946be8989c3f1 Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Wed, 24 Jun 2015 17:50:48 +0300
+Subject: [PATCH 02/53] Pike Rebase: cinder-volume reinit driver
+
+When cinder-volume starts and the driver cannot be initialized
+(e.g. using ceph backend and cluster not up yet), the process
+never recovers, but continues to run in a crippled state. This
+fix periodically attempts to re-initialize the driver until it
+is successful.
+
+Wait for RADOS to be ready, once driver is correctly initialized
+then system can easily recover from temporary failures.
+Otherwise, if we don't wait here, then cinder-volume will just abort
+after 6 retries (~ 30mins).
+
+(cherry picked from commit df88dcaed059c43d40ded09e99f43ff37ea63725)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+
+(cherry picked from commit 22d19b5d49cc25e42ddc7b6d8cb4ef0e9cd5b79b)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/api/openstack/wsgi.py |  8 ++++----
+ cinder/volume/drivers/rbd.py | 23 ++++++++++++++++++-----
+ cinder/volume/manager.py     |  4 ++++
+ 3 files changed, 26 insertions(+), 9 deletions(-)
+
+diff --git a/cinder/api/openstack/wsgi.py b/cinder/api/openstack/wsgi.py
+index eeb9df1..755ac2f 100644
+--- a/cinder/api/openstack/wsgi.py
++++ b/cinder/api/openstack/wsgi.py
+@@ -815,9 +815,9 @@ class Resource(wsgi.Application):
+     def __call__(self, request):
+         """WSGI method that controls (de)serialization and method dispatch."""
+ 
+-        LOG.info("%(method)s %(url)s",
+-                 {"method": request.method,
+-                  "url": request.url})
++        LOG.debug("%(method)s %(url)s",
++                  {"method": request.method,
++                   "url": request.url})
+ 
+         if self.support_api_request_version:
+             # Set the version of the API requested based on the header
+@@ -942,7 +942,7 @@ class Resource(wsgi.Application):
+             msg_dict = dict(url=request.url, e=e)
+             msg = "%(url)s returned a fault: %(e)s"
+ 
+-        LOG.info(msg, msg_dict)
++        LOG.debug(msg, msg_dict)
+ 
+         if hasattr(response, 'headers'):
+             for hdr, val in response.headers.items():
+diff --git a/cinder/volume/drivers/rbd.py b/cinder/volume/drivers/rbd.py
+index e6a2783..feb0399 100644
+--- a/cinder/volume/drivers/rbd.py
++++ b/cinder/volume/drivers/rbd.py
+@@ -266,11 +266,24 @@ class RBDDriver(driver.CloneableImageVD,
+             if not val:
+                 raise exception.InvalidConfigurationValue(option=attr,
+                                                           value=val)
+-        # NOTE: Checking connection to ceph
+-        # RADOSClient __init__ method invokes _connect_to_rados
+-        # so no need to check for self.rados.Error here.
+-        with RADOSClient(self):
+-            pass
++
++        # Wait for RADOS to be ready, once driver is correctly
++        # initialized then system can easily recover from temporary failures.
++        # Otherwise, if we don't wait here, then cinder-volume will just abort
++        # after 6 retries (~ 30mins).
++        LOG.info("Checking Ceph cluster connectivity")
++        while 1:
++            try:
++                # NOTE: Checking connection to ceph
++                # RADOSClient __init__ method invokes _connect_to_rados
++                # so no need to check for self.rados.Error here.
++                with RADOSClient(self):
++                    LOG.info("Ceph cluster is up, continuing with "
++                             "driver initialization")
++                    break
++            except exception.VolumeBackendAPIException:
++                LOG.warning("Ceph is down, retrying")
++                pass
+ 
+     def RBDProxy(self):
+         return tpool.Proxy(self.rbd.RBD())
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index f80ec2e..061479a 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -2363,6 +2363,10 @@ class VolumeManager(manager.CleanableManager,
+                         {'config_group': config_group},
+                         resource={'type': 'driver',
+                                   'id': self.driver.__class__.__name__})
++            # Workaround to have cinder-volume recover when it is
++            # started with the ceph backend and the ceph cluster is not up yet.
++            LOG.warning('Attempting to re-initialize driver')
++            self.init_host()
+         else:
+             volume_stats = self.driver.get_volume_stats(refresh=True)
+             if self.extra_capabilities:
+-- 
+2.7.4
+

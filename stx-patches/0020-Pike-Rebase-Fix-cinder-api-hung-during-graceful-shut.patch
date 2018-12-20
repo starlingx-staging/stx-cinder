@@ -1,0 +1,60 @@
+From ad013b3f852f48ef7efa70469d67414b48dd4412 Mon Sep 17 00:00:00 2001
+From: Al Bailey <al.bailey@windriver.com>
+Date: Fri, 21 Apr 2017 10:05:38 -0400
+Subject: [PATCH 20/53] Pike Rebase: Fix cinder-api hung during graceful
+ shutdown
+
+cinder-api should die if hung during graceful shutdown
+
+When the cinder-api parent process is killed by "kill -9" the child
+processes detect this and attempt a graceful shutdown.
+
+However if there are outstanding wsgi requests, these child processes
+seem to wait forever for eventlets to complete which never actually
+complete.
+
+This fix means that once a STOP has been processed for the cinder-api
+wsgi service, it will send a SIGALARM after 1 second.
+
+In oslo_service a SIGALARM is tied to a graceful shutdown timeout which
+ensures that the process will actually die.
+
+This code waits 1 second, because SM will typically restart right away
+and only has 30 seconds to be able to bind to its server port. We can
+change this value or make it configurable.
+
+Note: this code is also affected when kill -TERM (which is a catchable
+signal) is processed by the parent process and attempts a normal clean
+shutdown of the child processes. This typically only takes 100 millis
+though.
+
+---
+ cinder/service.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/cinder/service.py b/cinder/service.py
+index 1c71868..0cc42e1 100644
+--- a/cinder/service.py
++++ b/cinder/service.py
+@@ -21,6 +21,7 @@
+ import inspect
+ import os
+ import random
++import signal
+ 
+ from oslo_concurrency import processutils
+ from oslo_config import cfg
+@@ -630,6 +631,10 @@ class WSGIService(service.ServiceBase):
+         """
+         self.server.stop()
+ 
++        # SIGALM is registered in oslo_service to force shutdown
++        # delay 1 second to allow stop to complete normally
++        signal.alarm(1)
++
+     def wait(self):
+         """Wait for the service to stop serving this API.
+ 
+-- 
+2.7.4
+

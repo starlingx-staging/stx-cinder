@@ -1,0 +1,46 @@
+From 222e005a9e907155ccb202151acc275dc7129ad4 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Mon, 11 Dec 2017 12:50:22 +0000
+Subject: [PATCH 36/53] Pike Rebase: Bump retry count on tgt-admin update from
+ 3 to 6 - Unit Test
+
+---
+ cinder/tests/unit/targets/test_tgt_driver.py | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/cinder/tests/unit/targets/test_tgt_driver.py b/cinder/tests/unit/targets/test_tgt_driver.py
+index db5554d..7b48b85 100644
+--- a/cinder/tests/unit/targets/test_tgt_driver.py
++++ b/cinder/tests/unit/targets/test_tgt_driver.py
+@@ -406,3 +406,28 @@ class TestTgtAdmDriver(tf.TargetDriverFixture):
+                     self.fake_volumes_dir))
+             # 3 - default retries count value for utils.retry
+             self.assertEqual(3, get_target.call_count)
++
++    def test_create_iscsi_target_tgt_update_retry(self):
++        tgt_admin_update_count = [0]
++
++        def fail_tgt_update(*args, **kwargs):
++            try:
++                if args[0] == 'tgt-admin' and args[1] == '--update':
++                    tgt_admin_update_count[0] += 1
++                    raise putils.ProcessExecutionError(stderr='')
++            except IndexError:
++                pass
++            return ('', '')
++
++        with mock.patch('cinder.utils.execute', side_effect=fail_tgt_update),\
++                mock.patch.object(
++                    self.target, '_get_target', return_value=1), \
++                mock.patch.object(
++                    self.target, '_verify_backing_lun',
++                    side_effect=lambda x, y: True):
++            self.assertRaises(
++                exception.ISCSITargetCreateFailed,
++                self.target.create_iscsi_target,
++                self.test_vol, 1, 0, self.fake_volumes_dir)
++            # 6 - default retries count value for _do_tgt_update
++            self.assertEqual(6, tgt_admin_update_count[0])
+-- 
+2.7.4
+

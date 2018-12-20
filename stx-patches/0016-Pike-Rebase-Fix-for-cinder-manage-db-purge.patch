@@ -1,0 +1,36 @@
+From af45f7d8f8db3cde2238c2e1980d16dc0e951917 Mon Sep 17 00:00:00 2001
+From: Robert Church <robert.church@windriver.com>
+Date: Tue, 7 Feb 2017 08:49:40 -0600
+Subject: [PATCH 16/53] Pike Rebase: Fix for cinder-manage db purge
+
+As part of rebase testing, cinder-manage db purge throws and exception
+on a fresh install:
+
+DBError: (psycopg2.ProgrammingError) operator does not exist: boolean = integer
+
+This update fixes this issue.
+
+---
+ cinder/db/sqlalchemy/api.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cinder/db/sqlalchemy/api.py b/cinder/db/sqlalchemy/api.py
+index cda5826..a969b4a 100644
+--- a/cinder/db/sqlalchemy/api.py
++++ b/cinder/db/sqlalchemy/api.py
+@@ -6394,9 +6394,9 @@ def purge_deleted_rows(context, age_in_days):
+                 if six.text_type(table) == "quality_of_service_specs":
+                     session.query(models.QualityOfServiceSpecs).filter(
+                         and_(models.QualityOfServiceSpecs.specs_id.isnot(
+-                            None), models.QualityOfServiceSpecs.deleted == 1,
+-                            models.QualityOfServiceSpecs.deleted_at <
+-                            deleted_age)).delete()
++                            None), models.QualityOfServiceSpecs.
++                            deleted.is_(True), models.QualityOfServiceSpecs.
++                            deleted_at < deleted_age)).delete()
+                 result = session.execute(
+                     table.delete()
+                     .where(table.c.deleted_at < deleted_age))
+-- 
+2.7.4
+

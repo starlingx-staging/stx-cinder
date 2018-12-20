@@ -1,0 +1,2058 @@
+From d871e7d031648da8a960fc71fc0e84ad3a3bfd17 Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Fri, 26 Jun 2015 11:51:05 +0300
+Subject: [PATCH 03/53] Pike Rebase: TiS Backup and Restore Feature
+
+Propagates the Backup & Restore feature for Cinder
+
+Overwrite iscsi initiator name
+
+Compute nodes use iscsi initiator names as part of iscsi
+authentication to access LVM cinder volumes. This information
+is also stored inside instance information.
+
+I case of host reinstalls, the initiator name is regenerated and
+will cause issues with shutoff instances that are still present
+on the compute node and that are not migrated when the node is
+locked
+
+The initiator name is stored in the database when the node is
+first configured and will be set to that value each time,
+preventing unwanted changes.
+
+When importing cinder volumes it is important to also restore
+the iscsi target configuration to prevent any missing and/or
+stale data
+
+Cinder show 'wrs-volume:backup_status' field missing Reason text
+
+Problem:
+1. In the base driver code the NotImplementedError exception doesn't provide
+   an error msg
+2. In import_volume and export_snapshot code failure reason is always missing
+
+Solution: Adding failure reason in 'wrs-volume:backup_status' in cinder show and
+          cinder snapshot-show cmd
+
+(cherry picked from commit 60df4dd7d313410fd84cd8187d950731aae8046e)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/api/contrib/extended_snapshot_attributes.py |   9 +-
+ cinder/api/contrib/snapshot_actions.py             |  49 ++
+ cinder/api/contrib/snapshot_export_action.py       | 130 ++++++
+ cinder/api/contrib/volume_export.py                | 151 ++++++
+ .../migrate_repo/versions/073_cinder_init.py       |  24 +
+ cinder/db/sqlalchemy/models.py                     |  10 +-
+ cinder/objects/base.py                             |   1 +
+ cinder/objects/fields.py                           |  11 +-
+ cinder/objects/snapshot.py                         |   5 +-
+ cinder/objects/volume.py                           |   5 +-
+ cinder/tests/unit/objects/test_objects.py          |   4 +-
+ cinder/tests/unit/targets/test_iet_driver.py       |   4 +-
+ cinder/tests/unit/targets/test_tgt_driver.py       |   4 +-
+ cinder/tests/unit/test_volume_utils.py             |  10 +-
+ .../tests/unit/volume/drivers/test_lvm_driver.py   |   6 +-
+ cinder/tests/unit/volume/test_driver.py            |   8 +-
+ cinder/tests/unit/volume/test_volume_migration.py  |   2 +-
+ cinder/utils.py                                    |  36 ++
+ cinder/volume/api.py                               | 100 ++++
+ cinder/volume/driver.py                            | 509 ++++++++++++++++++++-
+ cinder/volume/drivers/lvm.py                       | 183 ++++++++
+ cinder/volume/drivers/rbd.py                       |  35 ++
+ cinder/volume/manager.py                           | 109 +++++
+ cinder/volume/rpcapi.py                            |  25 +
+ cinder/volume/targets/iscsi.py                     |  27 +-
+ 25 files changed, 1432 insertions(+), 25 deletions(-)
+ create mode 100644 cinder/api/contrib/snapshot_export_action.py
+ create mode 100644 cinder/api/contrib/volume_export.py
+
+diff --git a/cinder/api/contrib/extended_snapshot_attributes.py b/cinder/api/contrib/extended_snapshot_attributes.py
+index f958510..037b2fb 100644
+--- a/cinder/api/contrib/extended_snapshot_attributes.py
++++ b/cinder/api/contrib/extended_snapshot_attributes.py
+@@ -11,6 +11,13 @@
+ #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #   License for the specific language governing permissions and limitations
+ #   under the License.
++#
++# Copyright (c) 2014 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """The Extended Snapshot Attributes API extension."""
+ 
+@@ -52,7 +59,7 @@ class Extended_snapshot_attributes(extensions.ExtensionDescriptor):
+ 
+     name = "ExtendedSnapshotAttributes"
+     alias = "os-extended-snapshot-attributes"
+-    updated = "2012-06-19T00:00:00+00:00"
++    updated = "2014-09-19T00:00:00+00:00"
+ 
+     def get_controller_extensions(self):
+         controller = ExtendedSnapshotAttributesController()
+diff --git a/cinder/api/contrib/snapshot_actions.py b/cinder/api/contrib/snapshot_actions.py
+index fd8cb7a..d42a610 100644
+--- a/cinder/api/contrib/snapshot_actions.py
++++ b/cinder/api/contrib/snapshot_actions.py
+@@ -11,6 +11,13 @@
+ #   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #   License for the specific language governing permissions and limitations
+ #   under the License.
++#
++# Copyright (c) 2014 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ from oslo_log import log as logging
+ from six.moves import http_client
+@@ -22,6 +29,8 @@ from cinder.i18n import _
+ from cinder import objects
+ from cinder.objects import fields
+ 
++from cinder import volume
++
+ LOG = logging.getLogger(__name__)
+ 
+ 
+@@ -33,6 +42,7 @@ def authorize(context, action_name):
+ class SnapshotActionsController(wsgi.Controller):
+     def __init__(self, *args, **kwargs):
+         super(SnapshotActionsController, self).__init__(*args, **kwargs)
++        self.volume_api = volume.API()
+         LOG.debug("SnapshotActionsController initialized")
+ 
+     @wsgi.action('os-update_snapshot_status')
+@@ -101,6 +111,45 @@ class SnapshotActionsController(wsgi.Controller):
+         current_snapshot.save()
+         return webob.Response(status_int=http_client.ACCEPTED)
+ 
++#    @wsgi.response(202)
++#    @wsgi.action('os-export_snapshot')
++#    def _export_snapshot(self, req, id, body):
++#        """Export a snapshot to a file.
++#        """
++#
++#        context = req.environ['cinder.context']
++#        authorize(context, 'export_snapshot')
++#
++#        LOG.debug("body: %s" % body)
++#
++#        current_snapshot = db.snapshot_get(context, id)
++#
++#        if current_snapshot['status'] not in {'available'}:
++#            msg = _("Snapshot status %(cur)s not allowed for "
++#                    "export_snapshot") % {
++#                        'cur': current_snapshot['status']}
++#            raise webob.exc.HTTPBadRequest(explanation=msg)
++#
++#        LOG.info("Exporting snapshot %(id)s", {'id': id})
++#
++#        try:
++#            snapshot = self.volume_api.get_snapshot(context, id)
++#        except exception.SnapshotNotFound as error:
++#            raise webob.exc.HTTPNotFound(explanation=error.msg)
++#
++#        try:
++#            response = self.volume_api.export_snapshot(context, snapshot)
++#        except exception.InvalidSnapshot as error:
++#            raise webob.exc.HTTPBadRequest(explanation=error.msg)
++#        except ValueError as error:
++#            raise webob.exc.HTTPBadRequest(explanation=unicode(error))
++#        except messaging.RemoteError as error:
++#            msg = "%(err_type)s: %(err_msg)s" % {'err_type': error.exc_type,
++#                                                 'err_msg': error.value}
++#            raise webob.exc.HTTPBadRequest(explanation=msg)
++#
++#        return {'os-export_snapshot': response}
++
+ 
+ class Snapshot_actions(extensions.ExtensionDescriptor):
+     """Enable snapshot manager actions."""
+diff --git a/cinder/api/contrib/snapshot_export_action.py b/cinder/api/contrib/snapshot_export_action.py
+new file mode 100644
+index 0000000..d32384c
+--- /dev/null
++++ b/cinder/api/contrib/snapshot_export_action.py
+@@ -0,0 +1,130 @@
++#   Copyright 2013, Red Hat, Inc.
++#
++#   Licensed under the Apache License, Version 2.0 (the "License"); you may
++#   not use this file except in compliance with the License. You may obtain
++#   a copy of the License at
++#
++#       http://www.apache.org/licenses/LICENSE-2.0
++#
++#   Unless required by applicable law or agreed to in writing, software
++#   distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#   License for the specific language governing permissions and limitations
++#   under the License.
++#
++# Copyright (c) 2014, 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
++
++import webob
++
++from cinder.api import extensions
++from cinder.api.openstack import wsgi
++from cinder import db
++from cinder import exception
++from cinder.i18n import _
++from cinder import volume
++from oslo_log import log as logging
++from oslo_messaging.rpc import client as rpc_client
++
++import six
++
++WRS_SNAP_EXPORT = 'wrs-snapshot:os-export_snapshot'
++
++LOG = logging.getLogger(__name__)
++
++authorize = extensions.soft_extension_authorizer(
++    'volume',
++    'snapshot_export_attributes')
++
++
++class SnapshotExportActionsController(wsgi.Controller):
++    def __init__(self, *args, **kwargs):
++        super(SnapshotExportActionsController, self).__init__(*args, **kwargs)
++        self.volume_api = volume.API()
++        LOG.debug("SnapshotActionsController initialized")
++
++    @wsgi.response(202)
++    @wsgi.action(WRS_SNAP_EXPORT)
++    def _volume_export_snapshot(self, req, id, body):
++        """Export a snapshot to a file."""
++
++        context = req.environ['cinder.context']
++
++        LOG.debug("body: %s", body)
++
++        current_snapshot = db.snapshot_get(context, id)
++
++        if current_snapshot['status'] not in {'available'}:
++            msg = _("Snapshot status %(cur)s not allowed for "
++                    "export_snapshot") % {
++                        'cur': current_snapshot['status']}
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++
++        LOG.info("Exporting snapshot %(id)s", {'id': id})
++
++        try:
++            snapshot = self.volume_api.get_snapshot(context, id)
++        except exception.SnapshotNotFound as error:
++            raise webob.exc.HTTPNotFound(explanation=error.msg)
++
++        try:
++            response = self.volume_api.export_snapshot(context, snapshot)
++        except exception.InvalidSnapshot as error:
++            raise webob.exc.HTTPBadRequest(explanation=error.msg)
++        except ValueError as error:
++            raise webob.exc.HTTPBadRequest(explanation=six.text_type(error))
++        except rpc_client.RemoteError as error:
++            msg = "%(err_type)s: %(err_msg)s" % {'err_type': error.exc_type,
++                                                 'err_msg': error.value}
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++
++        return {WRS_SNAP_EXPORT: response}
++
++    def _get_snapshots(self, context):
++        snapshots = self.volume_api.get_all_snapshots(context)
++        rval = {(snapshot['id'], snapshot) for snapshot in snapshots}
++        return rval
++
++    def _export_snapshot(self, req, resp_snap):
++        db_snap = req.cached_resource_by_id(resp_snap['id'], name='snapshots')
++        for attr in ['backup_status']:
++            key = "%s:%s" % (Snapshot_export_action.alias, attr)
++            resp_snap[key] = db_snap[attr]
++
++    @wsgi.extends
++    def show(self, req, resp_obj, id):
++        context = req.environ['cinder.context']
++        if authorize(context):
++            snapshot = resp_obj.obj['snapshot']
++            self._export_snapshot(req, snapshot)
++
++    @wsgi.extends
++    def detail(self, req, resp_obj):
++        context = req.environ['cinder.context']
++        if authorize(context):
++            for snapshot in list(resp_obj.obj['snapshots']):
++                self._export_snapshot(req, snapshot)
++
++
++class Snapshot_export_action(extensions.ExtensionDescriptor):
++    """Enable snapshot export to file"""
++
++    name = "SnapshotExportAction"
++    alias = "wrs-snapshot"
++    updated = "2014-08-16T00:00:00+00:00"
++
++    def get_controller_extensions(self):
++        controller = SnapshotExportActionsController()
++        extension = extensions.ControllerExtension(self,
++                                                   'snapshots',
++                                                   controller)
++        return [extension]
++
++
++def make_snapshot(elem):
++    elem.set('{%s}backup_status' % Snapshot_export_action.namespace,
++             '%s:backup_status' % Snapshot_export_action.alias)
+diff --git a/cinder/api/contrib/volume_export.py b/cinder/api/contrib/volume_export.py
+new file mode 100644
+index 0000000..f2a8e91
+--- /dev/null
++++ b/cinder/api/contrib/volume_export.py
+@@ -0,0 +1,151 @@
++#   Copyright (c) 2014 Wind River Systems, Inc.
++#   Copyright 2012 OpenStack Foundation
++#
++#   Licensed under the Apache License, Version 2.0 (the "License"); you may
++#   not use this file except in compliance with the License. You may obtain
++#   a copy of the License at
++#
++#       http://www.apache.org/licenses/LICENSE-2.0
++#
++#   Unless required by applicable law or agreed to in writing, software
++#   distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#   WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#   License for the specific language governing permissions and limitations
++#   under the License.
++#
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
++
++
++import webob
++
++from cinder.api import extensions
++from cinder.api.openstack import wsgi
++from cinder import exception
++from cinder.i18n import _
++from cinder import volume
++from oslo_log import log as logging
++from oslo_messaging.rpc import client as rpc_client
++
++import six
++
++WRS_VOL_EXPORT = 'wrs-volume:os-volume_export'
++WRS_VOL_IMPORT = 'wrs-volume:os-volume_import'
++
++LOG = logging.getLogger(__name__)
++
++authorize = extensions.soft_extension_authorizer(
++    'volume',
++    'volume_backup_status_attribute')
++
++
++class VolumeExportController(wsgi.Controller):
++    def __init__(self, *args, **kwargs):
++        super(VolumeExportController, self).__init__(*args, **kwargs)
++        self.volume_api = volume.API()
++
++    @wsgi.response(202)
++    @wsgi.action(WRS_VOL_EXPORT)
++    def _volume_export(self, req, id, body):
++        """Exports the specified volume to a file."""
++        context = req.environ['cinder.context']
++        if WRS_VOL_EXPORT not in body:
++            msg = _("Invalid request body")
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++
++        try:
++            volume = self.volume_api.get(context, id)
++        except exception.VolumeNotFound as error:
++            raise webob.exc.HTTPNotFound(explanation=error.msg)
++
++        try:
++            response = self.volume_api.export_volume(context,
++                                                     volume)
++        except exception.InvalidVolume as error:
++            raise webob.exc.HTTPBadRequest(explanation=error.msg)
++        except ValueError as error:
++            raise webob.exc.HTTPBadRequest(explanation=six.text_type(error))
++        except rpc_client.RemoteError as error:
++            msg = "%(err_type)s: %(err_msg)s" % {'err_type': error.exc_type,
++                                                 'err_msg': error.value}
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++        return {WRS_VOL_EXPORT: response}
++
++    @wsgi.response(202)
++    @wsgi.action(WRS_VOL_IMPORT)
++    def _volume_import(self, req, id, body):
++        """Imports the specified volume from a file."""
++        context = req.environ['cinder.context']
++        try:
++            params = body[WRS_VOL_IMPORT]
++        except (TypeError, KeyError):
++            msg = _("Invalid request body")
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++
++        if not params.get("file_name"):
++            msg = _("No file_name was specified in request.")
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++
++        try:
++            volume = self.volume_api.get(context, id)
++        except exception.VolumeNotFound as error:
++            raise webob.exc.HTTPNotFound(explanation=error.msg)
++
++        try:
++            response = self.volume_api.import_volume(context,
++                                                     volume,
++                                                     params["file_name"])
++        except exception.InvalidVolume as error:
++            raise webob.exc.HTTPBadRequest(explanation=error.msg)
++        except ValueError as error:
++            raise webob.exc.HTTPBadRequest(explanation=six.text_type(error))
++        except rpc_client.RemoteError as error:
++            msg = "%(err_type)s: %(err_msg)s" % {'err_type': error.exc_type,
++                                                 'err_msg': error.value}
++            raise webob.exc.HTTPBadRequest(explanation=msg)
++        return {WRS_VOL_IMPORT: response}
++
++    def _add_volume_backup_status_attribute(self, context, resp_volume):
++        try:
++            db_volume = self.volume_api.get(context, resp_volume['id'])
++        except Exception:
++            return
++        else:
++            key = "%s:backup_status" % Volume_export.alias
++            resp_volume[key] = db_volume['backup_status']
++
++    @wsgi.extends
++    def show(self, req, resp_obj, id):
++        context = req.environ['cinder.context']
++        if authorize(context):
++            self._add_volume_backup_status_attribute(context,
++                                                     resp_obj.obj['volume'])
++
++    @wsgi.extends
++    def detail(self, req, resp_obj):
++        context = req.environ['cinder.context']
++        if authorize(context):
++            for vol in list(resp_obj.obj['volumes']):
++                self._add_volume_backup_status_attribute(context, vol)
++
++
++class Volume_export(extensions.ExtensionDescriptor):
++    """Enable volume export/import"""
++
++    name = "VolumeExport"
++    alias = "wrs-volume"
++    updated = "2014-08-11T00:00:00+00:00"
++
++    def get_controller_extensions(self):
++        controller = VolumeExportController()
++        extension = extensions.ControllerExtension(self, 'volumes', controller)
++        return [extension]
++
++
++def make_volume(elem):
++    elem.set('{%s}backup_status' % Volume_export.namespace,
++             '%s:backup_status' % Volume_export.alias)
+diff --git a/cinder/db/sqlalchemy/migrate_repo/versions/073_cinder_init.py b/cinder/db/sqlalchemy/migrate_repo/versions/073_cinder_init.py
+index d5ca791..c185c8d 100644
+--- a/cinder/db/sqlalchemy/migrate_repo/versions/073_cinder_init.py
++++ b/cinder/db/sqlalchemy/migrate_repo/versions/073_cinder_init.py
+@@ -17,6 +17,7 @@ import datetime
+ from oslo_config import cfg
+ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index
+ from sqlalchemy import Integer, MetaData, String, Table, Text, UniqueConstraint
++from sqlalchemy.dialects.mysql import MEDIUMTEXT
+ 
+ # Get default values via config.  The defaults will either
+ # come from the default values set in the quota option
+@@ -32,6 +33,10 @@ CLASS_NAME = 'default'
+ CREATED_AT = datetime.datetime.now()  # noqa
+ 
+ 
++def MediumText():
++    return Text().with_variant(MEDIUMTEXT(), 'mysql')
++
++
+ def define_tables(meta):
+     services = Table(
+         'services', meta,
+@@ -135,6 +140,7 @@ def define_tables(meta):
+         Column('provider_id', String(255)),
+         Column('multiattach', Boolean),
+         Column('previous_status', String(255)),
++        Column('backup_status', String(255)),
+         mysql_engine='InnoDB',
+         mysql_charset='utf8'
+     )
+@@ -159,6 +165,21 @@ def define_tables(meta):
+         mysql_charset='utf8'
+     )
+ 
++    volume_fault = Table(
++        'volume_fault', meta,
++        Column('created_at', DateTime),
++        Column('updated_at', DateTime),
++        Column('deleted_at', DateTime),
++        Column('deleted', Boolean),
++        Column('id', Integer, primary_key=True, nullable=False),
++        Column('volume_id', String(length=36), ForeignKey('volumes.id'),
++               nullable=False),
++        Column('message', String(length=255)),
++        Column('details', MediumText()),
++        mysql_engine='InnoDB',
++        mysql_charset='utf8'
++    )
++
+     snapshots = Table(
+         'snapshots', meta,
+         Column('created_at', DateTime),
+@@ -184,6 +205,7 @@ def define_tables(meta):
+                ForeignKey('cgsnapshots.id')),
+         Column('provider_id', String(255)),
+         Column('provider_auth', String(255)),
++        Column('backup_status', String(255)),
+         mysql_engine='InnoDB',
+         mysql_charset='utf8'
+     )
+@@ -494,6 +516,7 @@ def define_tables(meta):
+             cgsnapshots,
+             volumes,
+             volume_attachment,
++            volume_fault,
+             snapshots,
+             snapshot_metadata,
+             quality_of_service_specs,
+@@ -536,6 +559,7 @@ def upgrade(migrate_engine):
+                   "volume_type_projects",
+                   "volumes",
+                   "volume_attachment",
++                  "volume_fault",
+                   "migrate_version",
+                   "quotas",
+                   "services",
+diff --git a/cinder/db/sqlalchemy/models.py b/cinder/db/sqlalchemy/models.py
+index 66752dc..512fe14 100644
+--- a/cinder/db/sqlalchemy/models.py
++++ b/cinder/db/sqlalchemy/models.py
+@@ -15,7 +15,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+-
++#
++# Copyright (c) 2014 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ """
+ SQLAlchemy models for cinder data.
+ """
+@@ -268,6 +274,7 @@ class Volume(BASE, CinderBase):
+     status = Column(String(255))  # TODO(vish): enum?
+     attach_status = Column(String(255))  # TODO(vish): enum
+     migration_status = Column(String(255))
++    backup_status = Column(String(255))
+ 
+     scheduled_at = Column(DateTime)
+     launched_at = Column(DateTime)
+@@ -671,6 +678,7 @@ class Snapshot(BASE, CinderBase):
+     cgsnapshot_id = Column(String(36))
+     group_snapshot_id = Column(String(36))
+     status = Column(String(255))
++    backup_status = Column(String(255))
+     progress = Column(String(255))
+     volume_size = Column(Integer)
+ 
+diff --git a/cinder/objects/base.py b/cinder/objects/base.py
+index 7b89c17..b672ec8 100644
+--- a/cinder/objects/base.py
++++ b/cinder/objects/base.py
+@@ -135,6 +135,7 @@ OBJ_VERSIONS.add('1.24', {'LogLevel': '1.0', 'LogLevelList': '1.0'})
+ OBJ_VERSIONS.add('1.25', {'Group': '1.2'})
+ OBJ_VERSIONS.add('1.26', {'Snapshot': '1.5'})
+ OBJ_VERSIONS.add('1.27', {'Backup': '1.5', 'BackupImport': '1.5'})
++OBJ_VERSIONS.add('1.28', {'Snapshot': '1.6', 'Volume': '1.7'})
+ 
+ 
+ class CinderObjectRegistry(base.VersionedObjectRegistry):
+diff --git a/cinder/objects/fields.py b/cinder/objects/fields.py
+index 1964582..02df5ea 100644
+--- a/cinder/objects/fields.py
++++ b/cinder/objects/fields.py
+@@ -11,6 +11,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """Custom fields for Cinder objects."""
+ 
+@@ -122,6 +129,7 @@ class SnapshotStatus(BaseCinderEnum):
+     CREATING = 'creating'
+     DELETING = 'deleting'
+     DELETED = 'deleted'
++    EXPORTING = 'exporting'
+     UPDATING = 'updating'
+     ERROR_DELETING = 'error_deleting'
+     UNMANAGING = 'unmanaging'
+@@ -129,7 +137,8 @@ class SnapshotStatus(BaseCinderEnum):
+     RESTORING = 'restoring'
+ 
+     ALL = (ERROR, AVAILABLE, CREATING, DELETING, DELETED,
+-           UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP, RESTORING)
++           EXPORTING, UPDATING, ERROR_DELETING, UNMANAGING, BACKING_UP,
++           RESTORING)
+ 
+ 
+ class SnapshotStatusField(BaseEnumField):
+diff --git a/cinder/objects/snapshot.py b/cinder/objects/snapshot.py
+index 4233b60..086f271 100644
+--- a/cinder/objects/snapshot.py
++++ b/cinder/objects/snapshot.py
+@@ -38,7 +38,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
+     # Version 1.3: SnapshotStatusField now includes "unmanaging"
+     # Version 1.4: SnapshotStatusField now includes "backing-up"
+     # Version 1.5: SnapshotStatusField now includes "restoring"
+-    VERSION = '1.5'
++    # Version 1.6: WRS: Add backup_status
++    VERSION = '1.6'
+ 
+     # NOTE(thangp): OPTIONAL_FIELDS are fields that would be lazy-loaded. They
+     # are typically the relationship in the sqlalchemy object.
+@@ -71,6 +72,8 @@ class Snapshot(cleanable.CinderCleanableObject, base.CinderObject,
+         'volume': fields.ObjectField('Volume', nullable=True),
+         'cgsnapshot': fields.ObjectField('CGSnapshot', nullable=True),
+         'group_snapshot': fields.ObjectField('GroupSnapshot', nullable=True),
++
++        'backup_status': fields.StringField(nullable=True),
+     }
+ 
+     @property
+diff --git a/cinder/objects/volume.py b/cinder/objects/volume.py
+index 50be64e..cf762a7 100644
+--- a/cinder/objects/volume.py
++++ b/cinder/objects/volume.py
+@@ -60,7 +60,8 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
+     # Version 1.4: Added cluster fields
+     # Version 1.5: Added group
+     # Version 1.6: This object is now cleanable (adds rows to workers table)
+-    VERSION = '1.6'
++    # Version 1.7: WRS: Added backup_status
++    VERSION = '1.7'
+ 
+     OPTIONAL_FIELDS = ('metadata', 'admin_metadata', 'glance_metadata',
+                        'volume_type', 'volume_attachment', 'consistencygroup',
+@@ -124,6 +125,8 @@ class Volume(cleanable.CinderCleanableObject, base.CinderObject,
+                                                nullable=True),
+         'snapshots': fields.ObjectField('SnapshotList', nullable=True),
+         'group': fields.ObjectField('Group', nullable=True),
++
++        'backup_status': fields.StringField(nullable=True),
+     }
+ 
+     # NOTE(thangp): obj_extra_fields is used to hold properties that are not
+diff --git a/cinder/tests/unit/objects/test_objects.py b/cinder/tests/unit/objects/test_objects.py
+index 62ae091..72d6149 100644
+--- a/cinder/tests/unit/objects/test_objects.py
++++ b/cinder/tests/unit/objects/test_objects.py
+@@ -45,9 +45,9 @@ object_data = {
+     'RequestSpec': '1.1-b0bd1a28d191d75648901fa853e8a733',
+     'Service': '1.4-a6727ccda6d4043f5e38e75c7c518c7f',
+     'ServiceList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+-    'Snapshot': '1.5-ac1cdbd5b89588f6a8f44afdf6b8b201',
++    'Snapshot': '1.6-d2f74ac21fa1de293c6c5c7e7b45f3f7',
+     'SnapshotList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+-    'Volume': '1.6-7d3bc8577839d5725670d55e480fe95f',
++    'Volume': '1.7-7807dc5f0d4593a1ce2f2c1768565f21',
+     'VolumeList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+     'VolumeAttachment': '1.2-b68b357a1756582b706006ea9de40c9a',
+     'VolumeAttachmentList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+diff --git a/cinder/tests/unit/targets/test_iet_driver.py b/cinder/tests/unit/targets/test_iet_driver.py
+index 8dfc482..553357d 100644
+--- a/cinder/tests/unit/targets/test_iet_driver.py
++++ b/cinder/tests/unit/targets/test_iet_driver.py
+@@ -193,9 +193,11 @@ class TestIetAdmDriver(tf.TargetDriverFixture):
+             self.target.ensure_export(ctxt,
+                                       self.testvol,
+                                       self.fake_volumes_dir)
++            expected_auth = ["stack-1-a60e2611875f40199931f2c76370d66b",
++                             "2FE0CQ8J196R"]
+             self.target.create_iscsi_target.assert_called_once_with(
+                 'iqn.2010-10.org.openstack:testvol',
+-                1, 0, self.fake_volumes_dir, None,
++                1, 0, self.fake_volumes_dir, tuple(expected_auth),
+                 portals_ips=[self.configuration.iscsi_ip_address],
+                 portals_port=int(self.configuration.iscsi_port),
+                 check_exit_code=False,
+diff --git a/cinder/tests/unit/targets/test_tgt_driver.py b/cinder/tests/unit/targets/test_tgt_driver.py
+index 21caab3..db5554d 100644
+--- a/cinder/tests/unit/targets/test_tgt_driver.py
++++ b/cinder/tests/unit/targets/test_tgt_driver.py
+@@ -342,7 +342,9 @@ class TestTgtAdmDriver(tf.TargetDriverFixture):
+         expected_result = {'location': '10.9.8.7:3260,1 ' +
+                            self.iscsi_target_prefix +
+                            self.testvol['name'] + ' 1',
+-                           'auth': 'CHAP QZJb P68e'}
++                           'auth': 'CHAP ' +
++                           'stack-1-a60e2611875f40199931f2c76370d66b ' +
++                           '2FE0CQ8J196R'}
+ 
+         with mock.patch('cinder.utils.execute', return_value=('', '')),\
+                 mock.patch.object(self.target, '_get_target',
+diff --git a/cinder/tests/unit/test_volume_utils.py b/cinder/tests/unit/test_volume_utils.py
+index 67028a9..d1dc5f3 100644
+--- a/cinder/tests/unit/test_volume_utils.py
++++ b/cinder/tests/unit/test_volume_utils.py
+@@ -385,23 +385,23 @@ class LVMVolumeDriverTestCase(test.TestCase):
+         self.assertEqual('10M', bs)
+ 
+         bs = volume_utils._check_blocksize('1xBBB')
+-        self.assertEqual('1M', bs)
++        self.assertEqual('4M', bs)
+ 
+         # Test 'volume_dd_blocksize' with fraction
+         bs = volume_utils._check_blocksize('1.3M')
+-        self.assertEqual('1M', bs)
++        self.assertEqual('4M', bs)
+ 
+         # Test zero-size 'volume_dd_blocksize'
+         bs = volume_utils._check_blocksize('0M')
+-        self.assertEqual('1M', bs)
++        self.assertEqual('4M', bs)
+ 
+         # Test negative 'volume_dd_blocksize'
+         bs = volume_utils._check_blocksize('-1M')
+-        self.assertEqual('1M', bs)
++        self.assertEqual('4M', bs)
+ 
+         # Test non-digital 'volume_dd_blocksize'
+         bs = volume_utils._check_blocksize('ABM')
+-        self.assertEqual('1M', bs)
++        self.assertEqual('4M', bs)
+ 
+     @mock.patch('cinder.volume.utils._usage_from_capacity')
+     @mock.patch('cinder.volume.utils.CONF')
+diff --git a/cinder/tests/unit/volume/drivers/test_lvm_driver.py b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+index 34c28f3..dd02626 100644
+--- a/cinder/tests/unit/volume/drivers/test_lvm_driver.py
++++ b/cinder/tests/unit/volume/drivers/test_lvm_driver.py
+@@ -198,7 +198,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+             volume_path = self.volume.driver.local_path(dst_volume)
+             snapshot_path = self.volume.driver.local_path(snapshot_ref)
+             volume_size = 1024
+-            block_size = '1M'
++            block_size = '4M'
+             mock_copy.assert_called_with(snapshot_path,
+                                          volume_path,
+                                          volume_size,
+@@ -492,7 +492,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+                 '/dev/mapper/cinder--volumes-testvol',
+                 '/dev/mapper/cinder--volumes--2-testvol',
+                 2048,
+-                '1M',
++                '4M',
+                 execute=mock_execute,
+                 sparse=False)
+ 
+@@ -541,7 +541,7 @@ class LVMVolumeDriverTestCase(test_driver.BaseDriverTestCase):
+                 '/dev/mapper/cinder--volumes-testvol',
+                 '/dev/mapper/cinder--volumes--2-testvol',
+                 2048,
+-                '1M',
++                '4M',
+                 execute=mock_execute,
+                 sparse=True)
+ 
+diff --git a/cinder/tests/unit/volume/test_driver.py b/cinder/tests/unit/volume/test_driver.py
+index 643186e..a1f39ce 100644
+--- a/cinder/tests/unit/volume/test_driver.py
++++ b/cinder/tests/unit/volume/test_driver.py
+@@ -323,7 +323,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
+                                       dest_vol)
+ 
+         self.assertEqual(attach_expected, mock_attach.mock_calls)
+-        mock_copy.assert_called_with('foo', 'bar', 1024, '1M', sparse=False)
++        mock_copy.assert_called_with('foo', 'bar', 1024, '4M', sparse=False)
+         self.assertEqual(detach_expected, mock_detach.mock_calls)
+ 
+         #  Test case for sparse_copy_volume = True
+@@ -336,7 +336,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
+                                       dest_vol)
+ 
+         self.assertEqual(attach_expected, mock_attach.mock_calls)
+-        mock_copy.assert_called_with('foo', 'bar', 1024, '1M', sparse=True)
++        mock_copy.assert_called_with('foo', 'bar', 1024, '4M', sparse=True)
+         self.assertEqual(detach_expected, mock_detach.mock_calls)
+ 
+         # cleanup resource
+@@ -423,7 +423,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
+             self.context, attach_info, encryption)
+         mock_fetch_to_raw.assert_called_once_with(
+             self.context, image_service, fake.IMAGE_ID,
+-            local_path, '1M', size=2)
++            local_path, '4M', size=2)
+         mock_detach_encryptor.assert_called_once_with(
+             attach_info, encryption)
+         mock_detach_volume.assert_called_once_with(
+@@ -521,7 +521,7 @@ class GenericVolumeDriverTestCase(BaseDriverTestCase):
+             self.context, attach_info, encryption)
+         mock_fetch_to_raw.assert_called_once_with(
+             self.context, image_service, fake.IMAGE_ID,
+-            local_path, '1M', size=2)
++            local_path, '4M', size=2)
+         mock_detach_encryptor.assert_called_once_with(
+             attach_info, encryption)
+         mock_detach_volume.assert_called_once_with(
+diff --git a/cinder/tests/unit/volume/test_volume_migration.py b/cinder/tests/unit/volume/test_volume_migration.py
+index ccdd893..cd585a7 100644
+--- a/cinder/tests/unit/volume/test_volume_migration.py
++++ b/cinder/tests/unit/volume/test_volume_migration.py
+@@ -519,7 +519,7 @@ class VolumeMigrationTestCase(base.BaseVolumeTestCase):
+             volume = db.volume_get(context.get_admin_context(), volume['id'])
+             self.assertEqual('error', volume['migration_status'])
+             self.assertEqual('available', volume['status'])
+-            mock_copy.assert_called_once_with('foo', 'bar', 0, '1M',
++            mock_copy.assert_called_once_with('foo', 'bar', 0, '4M',
+                                               sparse=True)
+ 
+     def fake_attach_volume(self, ctxt, volume, instance_uuid, host_name,
+diff --git a/cinder/utils.py b/cinder/utils.py
+index 0b18662..d44d7fc 100644
+--- a/cinder/utils.py
++++ b/cinder/utils.py
+@@ -21,6 +21,7 @@
+ import abc
+ import contextlib
+ import datetime
++import fcntl
+ import functools
+ import inspect
+ import logging as py_logging
+@@ -32,6 +33,7 @@ import re
+ import shutil
+ import socket
+ import stat
++import subprocess
+ import sys
+ import tempfile
+ import time
+@@ -123,6 +125,40 @@ def execute(*cmd, **kwargs):
+     return processutils.execute(*cmd, **kwargs)
+ 
+ 
++def piped_execute(cmd1, cmd2, **kwargs):
++    """Pipe output of cmd1 into cmd2."""
++    LOG.info("Piping cmd1='%s' into...", ' '.join(cmd1))
++    LOG.info("cmd2='%s'", ' '.join(cmd2))
++
++    if 'run_as_root' in kwargs and 'root_helper' not in kwargs:
++        kwargs['root_helper'] = get_root_helper()
++
++    try:
++        p1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE,
++                              stderr=subprocess.PIPE)
++    except OSError as e:
++        LOG.error("Pipe1 failed - %s ", e)
++        raise
++
++    # NOTE(dosaboy): ensure that the pipe is blocking. This is to work
++    # around the case where evenlet.green.subprocess is used which seems to
++    # use a non-blocking pipe.
++    flags = fcntl.fcntl(p1.stdout, fcntl.F_GETFL) & (~os.O_NONBLOCK)
++    fcntl.fcntl(p1.stdout, fcntl.F_SETFL, flags)
++
++    try:
++        p2 = subprocess.Popen(cmd2, stdin=p1.stdout,
++                              stdout=subprocess.PIPE,
++                              stderr=subprocess.PIPE)
++    except OSError as e:
++        LOG.error("Pipe2 failed - %s ", e)
++        raise
++
++    p1.stdout.close()
++    stdout, stderr = p2.communicate()
++    return p2.returncode, stderr
++
++
+ def check_ssh_injection(cmd_list):
+     ssh_injection_pattern = ['`', '$', '|', '||', ';', '&', '&&', '>', '>>',
+                              '<']
+diff --git a/cinder/volume/api.py b/cinder/volume/api.py
+index 789d4f7..3ec4dbf 100644
+--- a/cinder/volume/api.py
++++ b/cinder/volume/api.py
+@@ -13,6 +13,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2014 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """Handles all requests relating to volumes."""
+ 
+@@ -20,6 +27,7 @@ import ast
+ import collections
+ import datetime
+ import functools
++import os
+ 
+ from oslo_config import cfg
+ from oslo_log import log as logging
+@@ -85,6 +93,7 @@ CONF.register_opt(volume_same_az_opt)
+ CONF.register_opt(az_cache_time_opt)
+ 
+ CONF.import_opt('glance_core_properties', 'cinder.image.glance')
++CONF.import_opt('backup_dir', 'cinder.volume.driver')
+ 
+ LOG = logging.getLogger(__name__)
+ QUOTAS = quota.QUOTAS
+@@ -2077,6 +2086,97 @@ class API(base.Base):
+             volume.save()
+         return remaining_attachments
+ 
++    @wrap_check_policy
++    def export_volume(self, context, volume):
++        """Export the specified volume to a file."""
++
++        if volume['status'] not in ['available']:
++            msg = _('Volume status must be available.')
++            raise exception.InvalidVolume(reason=msg)
++
++        self.update(context, volume, {'status': 'exporting'})
++        status = "Export started at %s" % str(timeutils.utcnow())
++        self.update(context, volume, {'backup_status': status})
++
++        self.volume_rpcapi.export_volume(context,
++                                         volume)
++
++        response = {"id": volume['id'],
++                    "updated_at": volume['updated_at'],
++                    "status": 'exporting',
++                    "display_description": volume['display_description'],
++                    "size": volume['size'],
++                    "volume_type": volume['volume_type']}
++        return response
++
++    @wrap_check_policy
++    def import_volume(self, context, volume, file_name):
++        """Import the specified volume from a file."""
++
++        # Check whether file exists. NOTE: In order to provide an immediate and
++        # useful error message to the user here, I am making the assumption
++        # that the cinder-volume and cinder-api services are running on the
++        # same physical node (which is true for CGCS). If that ever changes,
++        # then this check can be removed from the API (it is also being done
++        # in the cinder-volume service).
++        file_path = os.path.join(CONF.backup_dir, file_name)
++        if not os.path.isfile(file_path):
++            raise exception.FileNotFound(file_path=file_path)
++
++        if volume['status'] not in ['available', 'error']:
++            msg = _('Volume status must be available or error.')
++            raise exception.InvalidVolume(reason=msg)
++
++        snapshots = self.db.snapshot_get_all_for_volume(context, volume['id'])
++        if len(snapshots):
++            msg = _("Volume has %d dependent snapshots") % len(snapshots)
++            raise exception.InvalidVolume(reason=msg)
++
++        self.update(context, volume, {'status': 'importing'})
++        status = "Import started at %s" % str(timeutils.utcnow())
++        self.update(context, volume, {'backup_status': status})
++
++        self.volume_rpcapi.import_volume(context,
++                                         volume,
++                                         file_name)
++
++        response = {"id": volume['id'],
++                    "updated_at": volume['updated_at'],
++                    "status": 'importing',
++                    "display_description": volume['display_description'],
++                    "size": volume['size'],
++                    "volume_type": volume['volume_type']}
++        return response
++
++    @wrap_check_policy
++    def export_snapshot(self, context, snapshot):
++        """Export the specified snapshot to a file."""
++
++        if snapshot['status'] not in ['available']:
++            msg = _('Snapshot status must be available.')
++            raise exception.InvalidSnapshot(reason=msg)
++
++        volume = self.db.volume_get(context, snapshot['volume_id'])
++
++        self.update_snapshot(context, snapshot,
++                             {'status': fields.SnapshotStatus.EXPORTING})
++        status = "Export started at %s" % str(timeutils.utcnow())
++        self.update_snapshot(context, snapshot, {'backup_status': status})
++        status = "Snapshot export started at %s" % str(timeutils.utcnow())
++        self.update(context, volume, {'backup_status': status})
++
++        self.volume_rpcapi.export_snapshot(context,
++                                           snapshot,
++                                           volume)
++
++        response = {"id": snapshot['id'],
++                    "updated_at": snapshot['updated_at'],
++                    "status": fields.SnapshotStatus.EXPORTING,
++                    "display_description": snapshot['display_description'],
++                    "volume_size": volume['size'],
++                    "volume_type": volume['volume_type']}
++        return response
++
+ 
+ class HostAPI(base.Base):
+     """Sub-set of the Volume Manager API for managing host operations."""
+diff --git a/cinder/volume/driver.py b/cinder/volume/driver.py
+index 230ce11..f7aa5e7 100644
+--- a/cinder/volume/driver.py
++++ b/cinder/volume/driver.py
+@@ -13,19 +13,33 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2014, 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ """Drivers for volumes."""
+ 
+ import abc
+ import time
+ 
++import os
+ from os_brick import exception as brick_exception
++import shutil
++import tarfile
++import tempfile
++
+ from oslo_concurrency import processutils
+ from oslo_config import cfg
+ from oslo_config import types
+ from oslo_log import log as logging
+ from oslo_utils import excutils
++from oslo_utils import timeutils
+ import six
+ 
++from cinder.db import base
+ from cinder import exception
+ from cinder.i18n import _
+ from cinder.image import image_utils
+@@ -36,6 +50,7 @@ from cinder.volume import configuration
+ from cinder.volume import driver_utils
+ from cinder.volume import rpcapi as volume_rpcapi
+ from cinder.volume import throttling
++from oslo_serialization import jsonutils
+ 
+ LOG = logging.getLogger(__name__)
+ 
+@@ -115,7 +130,9 @@ volume_opts = [
+                      'optionally, auto can be set and Cinder '
+                      'will autodetect type of backing device')),
+     cfg.StrOpt('volume_dd_blocksize',
+-               default='1M',
++               # WRS increase blocksize when using O_DIRECT to improved
++               # write throughput
++               default='4M',
+                help='The default block size used when copying/clearing '
+                     'volumes'),
+     cfg.StrOpt('volume_copy_blkio_cgroup_name',
+@@ -273,6 +290,9 @@ volume_opts = [
+                help='Availability zone for this volume backend. If not set, '
+                     'the storage_availability_zone option value is used as '
+                     'the default for all backends.'),
++    cfg.StrOpt('backup_dir',
++               default='/opt/backups',
++               help='Volume backup directory')
+ ]
+ 
+ # for backward compatibility
+@@ -304,6 +324,249 @@ CONF.register_opts(iser_opts)
+ CONF.import_opt('backup_use_same_host', 'cinder.backup.api')
+ 
+ 
++class VolumeMetadataAPI(base.Base):
++    """API for getting/setting volume metadata
++
++    Copied from class BackupMetadataAPI (cinder.backup.driver.py) in
++    Icehouse release.
++    """
++
++    TYPE_TAG_VOL_BASE_META = 'volume-base-metadata'
++    TYPE_TAG_VOL_META = 'volume-metadata'
++    TYPE_TAG_VOL_GLANCE_META = 'volume-glance-metadata'
++    TYPE_TAG_VOL_ATTACHMENT_META = 'volume-attachment-metadata'
++
++    def __init__(self, context, db_driver=None):
++        super(VolumeMetadataAPI, self).__init__(db_driver)
++        self.context = context
++
++    @staticmethod
++    def _is_serializable(value):
++        """Returns True if value is serializable."""
++        try:
++            jsonutils.dumps(value)
++        except TypeError:
++            LOG.info("Value with type=%s is not serializable", type(value))
++            return False
++
++        return True
++
++    def _save_vol_base_meta(self, container, volume_id):
++        """Save base volume metadata to container.
++
++        This will fetch all fields from the db Volume object for volume_id and
++        save them in the provided container dictionary.
++        """
++        type_tag = self.TYPE_TAG_VOL_BASE_META
++        LOG.debug("Getting metadata type '%s'", type_tag)
++        meta = self.db.volume_get(self.context, volume_id)
++        if meta:
++            container[type_tag] = {}
++            for key, value in meta:
++                # Exclude fields that are "not JSON serializable"
++                if not self._is_serializable(value):
++                    LOG.info("Unable to serialize field '%s' - excluding "
++                             "from backup", key)
++                    continue
++                container[type_tag][key] = value
++
++            LOG.debug("Completed fetching metadata type '%s'", type_tag)
++        else:
++            LOG.debug("No metadata type '%s' available", type_tag)
++
++    def _save_vol_meta(self, container, volume_id):
++        """Save volume metadata to container.
++
++        This will fetch all fields from the db VolumeMetadata object for
++        volume_id and save them in the provided container dictionary.
++        """
++        type_tag = self.TYPE_TAG_VOL_META
++        LOG.debug("Getting metadata type '%s'", type_tag)
++        meta = self.db.volume_metadata_get(self.context, volume_id)
++        if meta:
++            container[type_tag] = {}
++            for entry in meta:
++                # Exclude fields that are "not JSON serializable"
++                if not self._is_serializable(meta[entry]):
++                    LOG.info("Unable to serialize field '%s' - excluding "
++                             "from backup", entry)
++                    continue
++                container[type_tag][entry] = meta[entry]
++
++            LOG.debug("Completed fetching metadata type '%s'", type_tag)
++        else:
++            LOG.debug("No metadata type '%s' available", type_tag)
++
++    def _save_vol_glance_meta(self, container, volume_id):
++        """Save volume Glance metadata to container.
++
++        This will fetch all fields from the db VolumeGlanceMetadata object for
++        volume_id and save them in the provided container dictionary.
++        """
++        type_tag = self.TYPE_TAG_VOL_GLANCE_META
++        LOG.debug("Getting metadata type '%s'", type_tag)
++        try:
++            meta = self.db.volume_glance_metadata_get(self.context, volume_id)
++            if meta:
++                container[type_tag] = {}
++                for entry in meta:
++                    # Exclude fields that are "not JSON serializable"
++                    if not self._is_serializable(entry.value):
++                        LOG.info("Unable to serialize field '%s' - "
++                                 "excluding from backup", entry)
++                        continue
++                    container[type_tag][entry.key] = entry.value
++
++            LOG.debug("Completed fetching metadata type '%s'", type_tag)
++        except exception.GlanceMetadataNotFound:
++            LOG.debug("No metadata type '%s' available", type_tag)
++
++    def _save_vol_attach_meta(self, container, volume_id):
++        """Save volume metadata to container.
++
++        This will fetch all fields from the db VolumeAttachment object for
++        volume_id and save them in the provided container dictionary.
++        """
++        type_tag = self.TYPE_TAG_VOL_ATTACHMENT_META
++        LOG.debug("Getting metadata type '%s'", type_tag)
++
++        meta = self.db.volume_attachment_get_all_by_volume_id(
++            self.context, volume_id)
++        if meta:
++            container[type_tag] = []
++            for attachment in meta:
++                att_meta = {}
++                for entry in attachment:
++                    # Exclude fields that are not JSON serializable
++                    if not self._is_serializable(entry[1]):
++                        LOG.info("Unable to serialize field %(e)s"
++                                 " of attachment %(a)s - "
++                                 "excluding from backup",
++                                 {"e": entry[0],
++                                  "a": attachment['id']})
++                        continue
++                    att_meta[entry[0]] = entry[1]
++                container[type_tag].append(att_meta)
++
++            LOG.debug("Completed fetching "
++                      "metadata type '%s'", type_tag)
++        else:
++            LOG.debug("No metadata type '%s' available", type_tag)
++
++    @staticmethod
++    def _filter(metadata, fields):
++        """Returns set of metadata restricted to required fields.
++
++        If fields is empty list, the full set is returned.
++        """
++        if fields == []:
++            return metadata
++
++        subset = {}
++        for field in fields:
++            if field in metadata:
++                subset[field] = metadata[field]
++            else:
++                LOG.debug("Excluding field '%s'", field)
++
++        return subset
++
++    def _restore_vol_base_meta(self, metadata, volume_id, fields):
++        """Restore values to Volume object for provided fields."""
++        LOG.debug("Restoring volume base metadata")
++        # Only set the display_name if it was not None since the
++        # restore action will have set a name which is more useful than
++        # None.
++        key = 'display_name'
++        if key in fields and key in metadata and metadata[key] is None:
++            fields = [f for f in fields if f != key]
++
++        metadata = self._filter(metadata, fields)
++        self.db.volume_update(self.context, volume_id, metadata)
++
++    def _restore_vol_meta(self, metadata, volume_id, fields):
++        """Restore values to VolumeMetadata object for provided fields."""
++        LOG.debug("Restoring volume metadata")
++        metadata = self._filter(metadata, fields)
++        self.db.volume_metadata_update(self.context, volume_id, metadata, True)
++
++    def _restore_vol_glance_meta(self, metadata, volume_id, fields):
++        """Restore values to VolumeGlanceMetadata object for provided fields.
++
++        First delete any existing metadata then save new values.
++        """
++        LOG.debug("Restoring volume glance metadata")
++        metadata = self._filter(metadata, fields)
++        self.db.volume_glance_metadata_delete_by_volume(self.context,
++                                                        volume_id)
++        for key, value in metadata.items():
++            self.db.volume_glance_metadata_create(self.context,
++                                                  volume_id,
++                                                  key, value)
++
++        # Now mark the volume as bootable
++        self.db.volume_update(self.context, volume_id,
++                              {'bootable': True})
++
++    def _v1_restore_factory(self):
++        """All metadata is backed up but we selectively restore.
++
++        Returns a dictionary of the form:
++
++            {<type tag>: (<fields list>, <restore function>)}
++
++        Empty field list indicates that all backed up fields should be
++        restored.
++        """
++        return {self.TYPE_TAG_VOL_BASE_META:
++                (self._restore_vol_base_meta,
++                 ['display_name', 'display_description']),
++                self.TYPE_TAG_VOL_META:
++                (self._restore_vol_meta, []),
++                self.TYPE_TAG_VOL_GLANCE_META:
++                (self._restore_vol_glance_meta, [])}
++
++    def get(self, volume_id):
++        """Get volume metadata.
++
++        Returns a json-encoded dict containing all metadata and the restore
++        version i.e. the version used to decide what actually gets restored
++        from this container when doing a backup restore.
++        """
++        container = {'version': 1}
++        self._save_vol_base_meta(container, volume_id)
++        self._save_vol_meta(container, volume_id)
++        self._save_vol_glance_meta(container, volume_id)
++        self._save_vol_attach_meta(container, volume_id)
++
++        if container:
++            return jsonutils.dumps(container)
++        else:
++            return None
++
++    def put(self, volume_id, json_metadata):
++        """Restore volume metadata to a volume.
++
++        The json container should contain a version that is supported here.
++        """
++        meta_container = jsonutils.loads(json_metadata)
++        version = meta_container['version']
++        if version == 1:
++            factory = self._v1_restore_factory()
++        else:
++            msg = (_("Unsupported backup metadata version (%s)") % (version))
++            raise exception.CinderException(msg)
++
++        for type in factory:
++            func = factory[type][0]
++            fields = factory[type][1]
++            if type in meta_container:
++                func(meta_container[type], volume_id, fields)
++            else:
++                msg = "No metadata of type '%s' to restore" % (type)
++                LOG.debug(msg)
++
++
+ @six.add_metaclass(abc.ABCMeta)
+ class BaseVD(object):
+     """Executes commands relating to Volumes.
+@@ -1839,6 +2102,250 @@ class BaseVD(object):
+         msg = _("Extend volume not implemented")
+         raise NotImplementedError(msg)
+ 
++    def copy_volume_to_file(self, context, volume, dest_file):
++        """Copies a volume to a file."""
++
++        raise NotImplementedError("Driver is not initialized")
++
++    def copy_file_to_volume(self, context, src_file, volume):
++        """Copies a file to a volume."""
++
++        raise NotImplementedError("Driver is not initialized")
++
++    def copy_snapshot_to_file(self, snapshot, dest_file):
++        """Copies a snapshot to a file."""
++        raise NotImplementedError("Driver is not initialized")
++
++    def export_volume(self, context, volume, snapshot=None):
++        """Export the volume or snapshot to a file."""
++
++        dest_dir = self.configuration.backup_dir
++
++        if snapshot:
++            LOG.debug('export_snapshot %s volume %s to directory %s.',
++                      snapshot['name'], volume['name'], dest_dir)
++        else:
++            LOG.debug('export_volume %s to directory %s.',
++                      volume['name'], dest_dir)
++
++        # Check whether directory exists
++        if not os.path.isdir(dest_dir):
++            msg = (_('Destination directory %s does not exist.') % dest_dir)
++            raise exception.CinderException(msg)
++
++        # Ensure working directory exists
++        work_dir = self.configuration.backup_dir + "/temp"
++        if not os.path.isdir(work_dir):
++            os.mkdir(work_dir)
++        temp_dir = tempfile.mkdtemp(dir=work_dir)
++
++        # Export volume metadata to a file
++        volume_meta_api = VolumeMetadataAPI(context)
++        json_meta = volume_meta_api.get(volume['id'])
++        if json_meta:
++            meta_file = volume['name'] + '.meta'
++            meta_path = os.path.join(temp_dir, meta_file)
++            try:
++                with open(meta_path, 'w') as f:
++                    f.write(json_meta)
++            except IOError:
++                shutil.rmtree(temp_dir)
++                LOG.error("Failed to open file %s.", meta_path)
++                raise
++        else:
++            shutil.rmtree(temp_dir)
++            msg = (_('No volume metadata for volume %s.') % volume['name'])
++            raise exception.CinderException(msg)
++
++        # Copy volume or snapshot contents to a file
++        volume_path = None
++        volume_file = None
++        try:
++            volume_file = volume['name'] + '.vol'
++            volume_path = os.path.join(temp_dir, volume_file)
++            if snapshot:
++                self.copy_snapshot_to_file(snapshot, volume_path)
++            else:
++                self.copy_volume_to_file(context, volume, volume_path)
++        except Exception:
++            with excutils.save_and_reraise_exception():
++                msg = _("Failed to copy volume %(src)s to %(dest)s")
++                LOG.error(msg, {'src': volume['id'], 'dest': volume_path})
++                shutil.rmtree(temp_dir)
++
++        # Create a compressed tar file
++        tar_path = None
++        try:
++            now = timeutils.utcnow()
++            tar_file = (volume['name'] + '-' + now.strftime("%Y%m%d-%H%M%S") +
++                        '.tgz')
++            tar_path = os.path.join(dest_dir, tar_file)
++            # Using the python tar library block the process causing it
++            # to miss state reporting timings and may cause failure to
++            # export multiple volumes as the same time
++            args = ['tar', '-cvzf', tar_path, '-C', temp_dir,
++                    volume_file, meta_file]
++            self._try_execute(*args)
++        except Exception:
++            with excutils.save_and_reraise_exception():
++                LOG.error("Failed to create tar file %(dest)s",
++                          {'dest': tar_path})
++                shutil.rmtree(temp_dir)
++
++        # Remove the temporary files
++        shutil.rmtree(temp_dir)
++
++    def import_volume(self, context, volume, file_name):
++        """Import the volume from the specified file.
++
++        Returns the status that should be used for the imported volume.
++        """
++
++        LOG.debug('import_volume %s from file %s.', volume['name'], file_name)
++
++        if os.path.isabs(file_name):
++            msg = (_('Absolute path not allowed %s.') % file_name)
++            raise exception.CinderException(msg)
++
++        # Check whether file exists
++        file_name = os.path.join(self.configuration.backup_dir, file_name)
++        if not os.path.isfile(file_name):
++            msg = (_('File %s does not exist.') % file_name)
++            raise exception.CinderException(msg)
++
++        # Ensure working directory exists
++        work_dir = self.configuration.backup_dir + "/temp"
++        if not os.path.isdir(work_dir):
++            os.mkdir(work_dir)
++        temp_dir = tempfile.mkdtemp(dir=work_dir)
++
++        # Check the contents of the tar file
++        tar = tarfile.open(file_name)
++
++        # Find the meta and volume files
++        meta_file = None
++        volume_file = None
++        files = []
++        for tarinfo in tar:
++            files.append(tarinfo.name)
++            if tarinfo.name.endswith('.meta'):
++                meta_file = tarinfo.name
++            elif tarinfo.name.endswith('.vol'):
++                volume_file = tarinfo.name
++
++        if not meta_file:
++            shutil.rmtree(temp_dir)
++            msg = (_('No volume metadata found in %s.') % file_name)
++            raise exception.CinderException(msg)
++        if not volume_file:
++            shutil.rmtree(temp_dir)
++            msg = (_('No volume data found in %s.') % file_name)
++            raise exception.CinderException(msg)
++
++        # Extract the contents of the tar file; pipe through 'dd' to
++        # to enable O_DIRECT and larger blocksize.
++        tar.close()
++        dd_opts = "oflag=direct"
++        for fn in files:
++            cmd1 = ['tar', '-xzf', file_name, fn, '-O']
++            cmd2 = ['dd', 'of=%s/%s' % (temp_dir, fn), dd_opts,
++                    'obs=%s' % self.configuration.volume_dd_blocksize]
++            try:
++                ret, stderr = utils.piped_execute(cmd1, cmd2, run_as_root=True)
++                if ret:
++                    msg = (_("tar/dd failed - (ret=%(ret)s stderr=%(stderr)s)")
++                           % {'ret': ret, 'stderr': stderr})
++                    LOG.info(msg)
++                    raise exception.CinderException(msg)
++            except Exception:
++                with excutils.save_and_reraise_exception():
++                    msg = _("Failed to extract tar file (src)s to %(dest)s")
++                    LOG.error(msg, {'src': file_name, 'dest': temp_dir})
++                    shutil.rmtree(temp_dir)
++
++        # Examine volume metadata
++        meta_path = temp_dir + '/' + meta_file
++        try:
++            with open(meta_path, 'r') as f:
++                json_meta = f.read()
++        except IOError:
++            shutil.rmtree(temp_dir)
++            LOG.error("Failed to open file %s.", meta_path)
++            raise
++
++        # Check the version of the metadata
++        meta_container = jsonutils.loads(json_meta)
++        version = meta_container['version']
++        if version != 1:
++            shutil.rmtree(temp_dir)
++            msg = (_("Unsupported backup metadata version (%s)") % version)
++            raise exception.CinderException(msg)
++
++        # Ensure volume being imported matches id of destination volume
++        import_vol_id = meta_container['volume-base-metadata']['id']
++        if import_vol_id != volume['id']:
++            shutil.rmtree(temp_dir)
++            msg = (_('Volume ID being imported (%(import)s) does not match '
++                     'destination volume ID (%(dest)s)') %
++                   {'import': import_vol_id, 'dest': volume['id']})
++            raise exception.CinderException(msg)
++
++        # Ensure attachments validity
++        if not self._check_validity_of_attachments(volume, meta_container):
++            shutil.rmtree(temp_dir)
++            prev = [x['instance_uuid'] for x in
++                    meta_container['volume-attachment-metadata']]
++            curr = [x['instance_uuid'] for x in
++                    volume['volume_attachment']]
++            msg = (_("Volume being imported, (%(id)s), "
++                     "was attached to different "
++                     "instance(s) than destination volume (%(dest)s) "
++                     " prev attach:%(prev)s current attach:%(current)s") %
++                   {'id': import_vol_id, 'dest': volume['id'],
++                    'prev': prev, 'current': curr})
++            raise exception.CinderException(msg)
++
++        # Import volume contents from file
++        volume_path = None
++        try:
++            volume_path = temp_dir + '/' + volume_file
++            self.copy_file_to_volume(context, volume_path, volume)
++        except Exception:
++            with excutils.save_and_reraise_exception():
++                msg = _("Failed to copy %(src)s to volume %(dest)s")
++                LOG.error(msg, {'src': volume_path, 'dest': volume['id']})
++                shutil.rmtree(temp_dir)
++
++        # Remove the temporary files
++        shutil.rmtree(temp_dir)
++
++        if volume['volume_attachment']:
++            return 'in-use'
++        else:
++            return 'available'
++
++    def _check_validity_of_attachments(self, volume, meta):
++        """Check the validity of volume attachments
++
++        Ensure any instance attached to volume being imported matches
++        instance attached to destination volume (if any)
++        """
++        type_tag = 'volume-attachment-metadata'
++
++        # Attachments are considered valid by default if the volume is
++        # detached or the imported metadata does not contain any attachments
++        if not volume['volume_attachment'] or type_tag not in meta:
++            return True
++
++        # Each attachment in the imported metadata should match exactly
++        # one attachment in the volume attachment list
++        for prev_attachment in meta[type_tag]:
++            matches = [x for x in volume['volume_attachment'] if
++                       x['instance_uuid'] == prev_attachment['instance_uuid']]
++            if len(matches) != 1:
++                return False
++        return True
++
+     def accept_transfer(self, context, volume, new_user, new_project):
+         pass
+ 
+diff --git a/cinder/volume/drivers/lvm.py b/cinder/volume/drivers/lvm.py
+index 885c448..a2900f3 100644
+--- a/cinder/volume/drivers/lvm.py
++++ b/cinder/volume/drivers/lvm.py
+@@ -9,6 +9,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2014, 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """
+ Driver for Linux servers running LVM.
+@@ -852,3 +859,179 @@ class LVMVolumeDriver(driver.VolumeDriver):
+         self.target_driver.terminate_connection(volume, connector,
+                                                 **kwargs)
+         return has_shared_connections
++
++# START Windriver code
++
++    def restore_configuration(self):
++        self.target_driver._restore_configuration()
++
++    def copy_volume_to_file(self, context, volume, dest_file):
++        """Copies a volume to a file."""
++
++        # Use O_DIRECT to avoid thrashing the system buffer cache
++        extra_flags = []
++        if volutils.check_for_odirect_support(
++                self.local_path(volume), dest_file, 'iflag=direct'):
++            extra_flags.append('iflag=direct')
++        if volutils.check_for_odirect_support(
++                self.local_path(volume), dest_file, 'oflag=direct'):
++            extra_flags.append('oflag=direct')
++        conv = []
++        if not extra_flags:
++            conv.append('fdatasync')
++        if conv:
++            conv_options = 'conv=' + ",".join(conv)
++            extra_flags.append(conv_options)
++
++        try:
++            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
++            blocksize = volutils._check_blocksize(
++                self.configuration.volume_dd_blocksize)
++
++            # Perform the copy
++            cmd = ['dd',
++                   'if=%s' % self.local_path(volume),
++                   'of=%s' % dest_file,
++                   'count=%d' % size_in_bytes,
++                   'bs=%s' % blocksize,
++                   'status=none']
++            cmd.extend(extra_flags)
++            self._execute(*cmd, run_as_root=True)
++        except Exception:
++            msg = (_("Failed to copy volume %(src)s to %(dest)s") %
++                   {'src': volume['id'], 'dest': dest_file})
++            LOG.error(msg)
++            raise
++
++    def copy_file_to_volume(self, context, src_file, volume):
++        """Copies a file to a volume."""
++
++        if self._volume_not_present(volume['name']):
++            # The underlying volume is gone. We need to re-create it.
++            self.create_volume(volume)
++        elif self.vg.lv_has_snapshot(volume['name']):
++            LOG.error('Unable to copy due to existing snapshot '
++                      'for volume: %s', volume['name'])
++            raise exception.VolumeIsBusy(volume_name=volume['name'])
++
++        # Use O_DIRECT to avoid thrashing the system buffer cache
++        extra_flags = []
++        if volutils.check_for_odirect_support(
++                src_file, self.local_path(volume), 'iflag=direct'):
++            extra_flags.append('iflag=direct')
++        if volutils.check_for_odirect_support(
++                src_file, self.local_path(volume), 'oflag=direct'):
++            extra_flags.append('oflag=direct')
++        conv = []
++        if not extra_flags:
++            conv.append('fdatasync')
++        if conv:
++            conv_options = 'conv=' + ",".join(conv)
++            extra_flags.append(conv_options)
++
++        try:
++            size_in_bytes = int(volume['size']) * 1024 ** 3  # vol size is GB
++            blocksize = volutils._check_blocksize(
++                self.configuration.volume_dd_blocksize)
++
++            # Perform the copy
++            cmd = ['dd',
++                   'if=%s' % src_file,
++                   'of=%s' % self.local_path(volume),
++                   'count=%d' % size_in_bytes,
++                   'bs=%s' % blocksize]
++            cmd.extend(extra_flags)
++            utils.execute(*cmd, run_as_root=True)
++        except Exception:
++            msg = (_("Failed to copy %(src)s to volume %(dest)s") %
++                   {'src': src_file, 'dest': volume['id']})
++            LOG.error(msg)
++            raise
++
++        self.restore_configuration()
++
++    def copy_snapshot_to_file(self, snapshot, dest_file):
++        """Copies a snapshot to a file."""
++
++        # Some configurations of LVM do not automatically activate
++        # ThinLVM snapshot LVs.
++        self.vg.activate_lv(snapshot['name'], is_snapshot=True)
++
++        # Use O_DIRECT to avoid thrashing the system buffer cache
++        extra_flags = []
++        if volutils.check_for_odirect_support(
++                self.local_path(snapshot), dest_file, 'iflag=direct'):
++            extra_flags.append('iflag=direct')
++        if volutils.check_for_odirect_support(
++                self.local_path(snapshot), dest_file, 'oflag=direct'):
++            extra_flags.append('oflag=direct')
++        conv = []
++        if not extra_flags:
++            conv.append('fdatasync')
++        if conv:
++            conv_options = 'conv=' + ",".join(conv)
++            extra_flags.append(conv_options)
++
++        try:
++            size_in_bytes = int(snapshot['volume_size']) * 1024 ** 3
++            blocksize = volutils._check_blocksize(
++                self.configuration.volume_dd_blocksize)
++
++            # Perform the copy
++            cmd = ['dd',
++                   'if=%s' % self.local_path(snapshot),
++                   'of=%s' % dest_file,
++                   'count=%d' % size_in_bytes,
++                   'bs=%s' % blocksize]
++            cmd.extend(extra_flags)
++            utils.execute(*cmd, run_as_root=True)
++        except Exception:
++            msg = (_("Failed to export snapshot %(src)s to %(dest)s") %
++                   {'src': snapshot['id'], 'dest': dest_file})
++            LOG.error(msg)
++            raise
++
++# END Windriver code
++
++
++class LVMISCSIDriver(LVMVolumeDriver):
++    """Empty class designation for LVMISCSI.
++
++    Since we've decoupled the inheritance of iSCSI and LVM we
++    don't really need this class any longer.  We do however want
++    to keep it (at least for now) for back compat in driver naming.
++
++    """
++    def __init__(self, *args, **kwargs):
++        super(LVMISCSIDriver, self).__init__(*args, **kwargs)
++        LOG.warning('LVMISCSIDriver is deprecated, you should '
++                    'now just use LVMVolumeDriver and specify '
++                    'target_helper for the target driver you '
++                    'wish to use.')
++
++
++class LVMISERDriver(LVMVolumeDriver):
++    """Empty class designation for LVMISER.
++
++    Since we've decoupled the inheritance of data path in LVM we
++    don't really need this class any longer.  We do however want
++    to keep it (at least for now) for back compat in driver naming.
++
++    """
++    def __init__(self, *args, **kwargs):
++        super(LVMISERDriver, self).__init__(*args, **kwargs)
++
++        LOG.warning('LVMISERDriver is deprecated, you should '
++                    'now just use LVMVolumeDriver and specify '
++                    'target_helper for the target driver you '
++                    'wish to use. In order to enable iser, please '
++                    'set iscsi_protocol with the value iser.')
++
++        LOG.debug('Attempting to initialize LVM driver with the '
++                  'following target_driver: '
++                  'cinder.volume.targets.iser.ISERTgtAdm')
++        self.target_driver = importutils.import_object(
++            'cinder.volume.targets.iser.ISERTgtAdm',
++            configuration=self.configuration,
++            db=self.db,
++            executor=self._execute)
+diff --git a/cinder/volume/drivers/rbd.py b/cinder/volume/drivers/rbd.py
+index feb0399..14faf53 100644
+--- a/cinder/volume/drivers/rbd.py
++++ b/cinder/volume/drivers/rbd.py
+@@ -1471,3 +1471,38 @@ class RBDDriver(driver.CloneableImageVD,
+             snapshot_name = existing_ref['source-name']
+             volume.rename_snap(utils.convert_str(snapshot_name),
+                                utils.convert_str(snapshot.name))
++
++    def copy_volume_to_file(self, context, volume, dest_file):
++        """Copies a volume to a file."""
++
++        with fileutils.remove_path_on_error(dest_file):
++            args = ['rbd', 'export',
++                    '--pool', self.configuration.rbd_pool,
++                    volume['name'], dest_file]
++            args.extend(self._ceph_args())
++            self._try_execute(*args)
++
++    def copy_file_to_volume(self, context, src_file, volume):
++        """Copies a file to a volume."""
++
++        # Delete the volume before importing
++        self.delete_volume(volume)
++
++        # keep using the command line import instead of librbd since it
++        # detects zeroes to preserve sparseness in the image
++        args = ['rbd', 'import',
++                '--pool', self.configuration.rbd_pool,
++                src_file, volume['name'], '--new-format']
++        args.extend(self._ceph_args())
++        self._try_execute(*args)
++
++    def copy_snapshot_to_file(self, snapshot, dest_file):
++        """Copies a snapshot to a file."""
++
++        with fileutils.remove_path_on_error(dest_file):
++            args = ['rbd', 'export',
++                    '--pool', self.configuration.rbd_pool,
++                    snapshot['volume_name'],
++                    '--snap', snapshot['name'], dest_file]
++            args.extend(self._ceph_args())
++            self._try_execute(*args)
+diff --git a/cinder/volume/manager.py b/cinder/volume/manager.py
+index 061479a..400cc6e 100644
+--- a/cinder/volume/manager.py
++++ b/cinder/volume/manager.py
+@@ -13,6 +13,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2014 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ """
+ Volume manager manages creating, attaching, detaching, and persistent storage.
+@@ -4333,6 +4340,108 @@ class VolumeManager(manager.CleanableManager,
+         connection_info['attachment_id'] = attachment.id
+         return connection_info
+ 
++    def export_volume(self, context, volume_id):
++        """Exports the specified volume to a file."""
++        payload = {'volume_id': volume_id}
++        try:
++            utils.require_driver_initialized(self.driver)
++            volume = self.db.volume_get(context, volume_id)
++            self.driver.export_volume(context, volume)
++            LOG.debug("Exported volume %(volume_id)s successfully",
++                      {'volume_id': volume_id})
++            status = "Export completed at %s" % str(timeutils.utcnow())
++            self.db.volume_update(context, volume_id,
++                                  {'backup_status': status})
++
++        except Exception as error:
++            with excutils.save_and_reraise_exception():
++                if hasattr(error, 'stderr'):
++                    reason = error.stderr
++                else:
++                    reason = six.text_type(error)
++                status = "Export failed at %s. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                self.db.volume_update(context, volume_id,
++                                      {'backup_status': status[:255]})
++                payload['message'] = six.text_type(error)
++        finally:
++            self.db.volume_update(context, volume_id,
++                                  {'status': 'available'})
++
++    def import_volume(self, context, volume_id, file_name):
++        """Imports the specified volume from a file.
++
++        file_name is an absolute path to the file to be imported
++
++        """
++        payload = {'volume_id': volume_id, 'file_name': file_name}
++        updated_status = 'available'
++        try:
++            utils.require_driver_initialized(self.driver)
++            volume = self.db.volume_get(context, volume_id)
++            updated_status = self.driver.import_volume(context, volume,
++                                                       file_name)
++            LOG.debug("Imported volume %(volume_id)s from "
++                      "file (%(file_name)s) successfully",
++                      {'volume_id': volume_id, 'file_name': file_name})
++            status = "Import completed at %s" % str(timeutils.utcnow())
++            self.db.volume_update(context, volume_id,
++                                  {'backup_status': status})
++        except Exception as error:
++            with excutils.save_and_reraise_exception():
++                payload['message'] = six.text_type(error)
++                self.db.volume_update(context, volume_id,
++                                      {'status': 'error'})
++                if hasattr(error, 'stderr'):
++                    reason = error.stderr
++                else:
++                    reason = six.text_type(error)
++                status = "Import failed at %s. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                self.db.volume_update(context, volume_id,
++                                      {'backup_status': status[:255]})
++
++        self.db.volume_update(context, volume_id,
++                              {'status': updated_status})
++
++    def export_snapshot(self, context, snapshot_id, volume_id):
++        """Exports the specified snapshot to a file."""
++        payload = {'snapshot_id': snapshot_id,
++                   'volume_id': volume_id}
++        try:
++            utils.require_driver_initialized(self.driver)
++            snapshot = self.db.snapshot_get(context, snapshot_id)
++            volume = self.db.volume_get(context, volume_id)
++            self.driver.export_volume(context, volume, snapshot)
++            LOG.debug("Exported snapshot %(snapshot_id)s volume "
++                      "%(volume_id)s successfully",
++                      {'snapshot_id': snapshot_id, 'volume_id': volume_id})
++            status = "Export completed at %s" % str(timeutils.utcnow())
++            self.db.snapshot_update(context, snapshot_id,
++                                    {'backup_status': status})
++            status = ("Snapshot export completed at %s" %
++                      str(timeutils.utcnow()))
++            self.db.volume_update(context, volume_id,
++                                  {'backup_status': status})
++        except Exception as error:
++            with excutils.save_and_reraise_exception():
++                payload['message'] = six.text_type(error)
++                if hasattr(error, 'stderr'):
++                    reason = error.stderr
++                else:
++                    reason = six.text_type(error)
++                status = "Export failed at %s. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                self.db.snapshot_update(context, snapshot_id,
++                                        {'backup_status': status[:255]})
++                status = "Snapshot export failed at %s. Reason: %s" % (
++                    str(timeutils.utcnow()), reason)
++                self.db.volume_update(context, volume_id,
++                                      {'backup_status': status[:255]})
++        finally:
++            self.db.snapshot_update(context, snapshot_id,
++                                    {'status': 'available'})
++
+     def attachment_update(self,
+                           context,
+                           vref,
+diff --git a/cinder/volume/rpcapi.py b/cinder/volume/rpcapi.py
+index 443bab6..9ea21c2 100644
+--- a/cinder/volume/rpcapi.py
++++ b/cinder/volume/rpcapi.py
+@@ -11,6 +11,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2014, 2017 Wind River Systems, Inc.
++#
++#
++#
++#
++#
+ 
+ 
+ from cinder.common import constants
+@@ -495,3 +502,21 @@ class VolumeAPI(rpc.RPCAPI):
+         cctxt = self._get_cctxt(group.host, version='3.14')
+         return cctxt.call(ctxt, 'list_replication_targets',
+                           group=group)
++
++    def export_volume(self, ctxt, volume):
++        version = self._compat_ver('3.0', '2.0')
++        cctxt = self._get_cctxt(volume.host, version)
++        cctxt.cast(ctxt, 'export_volume', volume_id=volume.id)
++
++    def import_volume(self, ctxt, volume, file_name):
++        version = self._compat_ver('3.0', '2.0')
++        cctxt = self._get_cctxt(volume.host, version)
++        cctxt.cast(ctxt, 'import_volume',
++                   volume_id=volume.id, file_name=file_name)
++
++    def export_snapshot(self, ctxt, snapshot, volume):
++        version = self._compat_ver('3.0', '2.0')
++        cctxt = self._get_cctxt(volume.host, version)
++        cctxt.cast(ctxt, 'export_snapshot',
++                   snapshot_id=snapshot.id,
++                   volume_id=volume.id)
+diff --git a/cinder/volume/targets/iscsi.py b/cinder/volume/targets/iscsi.py
+index da6184b..4904ebe 100644
+--- a/cinder/volume/targets/iscsi.py
++++ b/cinder/volume/targets/iscsi.py
+@@ -194,8 +194,19 @@ class ISCSITarget(driver.Target):
+         # if DNE no big deal, we'll just create it
+         chap_auth = self._get_target_chap_auth(context, volume)
+         if not chap_auth:
+-            chap_auth = (vutils.generate_username(),
+-                         vutils.generate_password())
++            auth = volume['provider_auth']
++            if auth:
++                (auth_method, auth_username, auth_secret) = auth.split()
++                if auth_method == 'CHAP':
++                    chap_auth = (auth_username, auth_secret)
++                else:
++                    LOG.error("Failed create_export. "
++                              "Invalid auth_method: %(a)s for volume: %(v)s",
++                              {"a": auth_method, "v": volume['id']})
++                    return
++            else:
++                chap_auth = (vutils.generate_username(),
++                             vutils.generate_password())
+ 
+         # Get portals ips and port
+         portals_config = self._get_portals_config()
+@@ -249,7 +260,19 @@ class ISCSITarget(driver.Target):
+         iscsi_name = "%s%s" % (self.configuration.iscsi_target_prefix,
+                                volume['name'])
+ 
++        # Verify we haven't setup a CHAP creds file already
++        # if DNE no big deal, we'll just create it
+         chap_auth = self._get_target_chap_auth(context, volume)
++        if not chap_auth:
++            # Use the auth info in the volume if it is there.
++            auth = volume['provider_auth']
++            if auth:
++                (auth_method, auth_username, auth_secret) = auth.split()
++                if auth_method == 'CHAP':
++                    chap_auth = (auth_username, auth_secret)
++            else:
++                LOG.info("Skipping ensure_export. No iscsi_target "
++                         "provision for volume: %s", volume['id'])
+ 
+         # Get portals ips and port
+         portals_config = self._get_portals_config()
+-- 
+2.7.4
+

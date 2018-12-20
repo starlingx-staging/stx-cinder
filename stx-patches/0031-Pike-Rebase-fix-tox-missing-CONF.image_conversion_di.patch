@@ -1,0 +1,50 @@
+From ad6d44f3c0f916a8943d10ce0e42099325f96fec Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Thu, 7 Dec 2017 21:45:12 +0000
+Subject: [PATCH 31/53] Pike Rebase: fix tox missing CONF.image_conversion_dir
+
+First run of tox -e py27 fails because image conversion
+directory is missing. After the test fails the path is
+created and tox -e py27 passes.
+
+os.path.exists(CONF.image_conversion_dir) returns True
+then immediately after
+os.listdir(CONF.image_conversion_dir) fails because
+the directory doesn't exists
+
+"ls conversion" after running tox show the path exists
+even though os.listdir() failed
+
+Unable to get to the root cause of this puzzle so I'm
+wrapping it in "try ... except OSError: pass" instead.
+---
+ cinder/image/image_utils.py | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/cinder/image/image_utils.py b/cinder/image/image_utils.py
+index 3338d8e..fe3952f 100644
+--- a/cinder/image/image_utils.py
++++ b/cinder/image/image_utils.py
+@@ -645,11 +645,14 @@ def cleanup_temporary_dir():
+     """
+     if (CONF.image_conversion_dir and
+             os.path.exists(CONF.image_conversion_dir)):
+-        for f in os.listdir(CONF.image_conversion_dir):
+-            if f.startswith('tmp'):
+-                path = os.path.join(CONF.image_conversion_dir, f)
+-                LOG.info("cleanup: deleting: %s", path)
+-                os.remove(path)
++        try:
++            for f in os.listdir(CONF.image_conversion_dir):
++                if f.startswith('tmp'):
++                    path = os.path.join(CONF.image_conversion_dir, f)
++                    LOG.info("cleanup: deleting: %s", path)
++                    os.remove(path)
++        except OSError:
++            pass
+ 
+ 
+ def coalesce_chain(vhd_chain):
+-- 
+2.7.4
+

@@ -1,0 +1,33 @@
+From ca5943d93008e9970e518a3b429cc57949ffe868 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Tue, 12 Dec 2017 23:21:02 +0000
+Subject: [PATCH 39/53] Pike Rebase: Enhanced logging and error reporting - fix
+ migration script
+
+Upgrades fail because snapshot_fault table already exists.
+---
+ .../migrate_repo/versions/106_add_snapshot_fault_table.py     | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py b/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
+index fe30430..51bfaee 100644
+--- a/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
++++ b/cinder/db/sqlalchemy/migrate_repo/versions/106_add_snapshot_fault_table.py
+@@ -45,8 +45,9 @@ def upgrade(migrate_engine):
+         mysql_charset='utf8'
+     )
+ 
+-    try:
+-        snapshot_fault.create()
+-    except Exception:
+-        LOG.error("Table |%s| not created!", repr(snapshot_fault))
+-        raise
++    if not migrate_engine.has_table(snapshot_fault.name):
++        try:
++            snapshot_fault.create()
++        except Exception:
++            LOG.error("Table |%s| not created!", repr(snapshot_fault))
++            raise
+-- 
+2.7.4
+

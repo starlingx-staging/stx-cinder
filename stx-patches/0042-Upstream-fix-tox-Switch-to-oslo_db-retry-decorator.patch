@@ -1,0 +1,50 @@
+From bb4becc17c31fcb6793f1ee6106aaf0df20686ea Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Mon, 22 Jan 2018 14:32:42 +0000
+Subject: [PATCH 42/53] Upstream: (fix tox) Switch to oslo_db retry decorator
+
+Fix tox issues added by upstream commit
+"Switch to oslo_db retry decorator"
+---
+ cinder/db/sqlalchemy/api.py | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/cinder/db/sqlalchemy/api.py b/cinder/db/sqlalchemy/api.py
+index a969b4a..5335f9a 100644
+--- a/cinder/db/sqlalchemy/api.py
++++ b/cinder/db/sqlalchemy/api.py
+@@ -2875,7 +2875,6 @@ def volume_fault_get(context, volume_id):
+ 
+ @require_context
+ @require_volume_exists
+-@_retry_on_deadlock
+ def volume_fault_delete(context, volume_id):
+     _volume_fault_get_query(context, volume_id).\
+         update({'deleted': True,
+@@ -2885,7 +2884,6 @@ def volume_fault_delete(context, volume_id):
+ 
+ @require_context
+ @require_volume_exists
+-@_retry_on_deadlock
+ def volume_fault_update(context, volume_id, values):
+     session = get_session()
+ 
+@@ -3271,7 +3269,6 @@ def snapshot_fault_get(context, snapshot_id):
+ 
+ @require_context
+ @require_snapshot_exists
+-@_retry_on_deadlock
+ def snapshot_fault_delete(context, snapshot_id):
+     _snapshot_fault_get_query(context, snapshot_id).\
+         update({'deleted': True,
+@@ -3281,7 +3278,6 @@ def snapshot_fault_delete(context, snapshot_id):
+ 
+ @require_context
+ @require_snapshot_exists
+-@_retry_on_deadlock
+ def snapshot_fault_update(context, snapshot_id, values):
+     session = get_session()
+ 
+-- 
+2.7.4
+

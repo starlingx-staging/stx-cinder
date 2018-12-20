@@ -1,0 +1,73 @@
+From c6efadcf23a340805ce459761945f4b9ce614720 Mon Sep 17 00:00:00 2001
+From: Daniel Badea <daniel.badea@windriver.com>
+Date: Sun, 10 Dec 2017 20:07:45 +0000
+Subject: [PATCH 35/53] Pike Rebase: cinder-scheduler and cinder-volume take
+ long time to shutdown - Unit Test
+
+---
+ cinder/service.py                 |  2 +-
+ cinder/tests/unit/test_service.py | 35 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/cinder/service.py b/cinder/service.py
+index 01c6078..3cf8cc8 100644
+--- a/cinder/service.py
++++ b/cinder/service.py
+@@ -472,7 +472,7 @@ class Service(service.Service):
+             try:
+                 x.stop()
+             except Exception:
+-                self.timers_skip.append(x)
++                pass
+ 
+         if self.coordination:
+             try:
+diff --git a/cinder/tests/unit/test_service.py b/cinder/tests/unit/test_service.py
+index 4944f0d..b93a2e5 100644
+--- a/cinder/tests/unit/test_service.py
++++ b/cinder/tests/unit/test_service.py
+@@ -302,6 +302,41 @@ class ServiceTestCase(test.TestCase):
+         serv.rpcserver.stop.assert_called_once_with()
+         serv.rpcserver.wait.assert_called_once_with()
+ 
++    @mock.patch('cinder.service.Service.report_state')
++    @mock.patch('cinder.service.Service.periodic_tasks')
++    @mock.patch.object(service.loopingcall, 'FixedIntervalLoopingCall')
++    @mock.patch.object(rpc, 'get_server')
++    @mock.patch('cinder.db')
++    def test_service_stop_waits_for_timers(self, mock_db, mock_rpc,
++                                           mock_loopcall, mock_periodic,
++                                           mock_report):
++        """Test that we wait for loopcalls only if stop succeeds."""
++        serv = service.Service(
++            self.host,
++            self.binary,
++            self.topic,
++            'cinder.tests.unit.test_service.FakeManager',
++            report_interval=5,
++            periodic_interval=10,
++        )
++
++        # One of the loopcalls will raise an exception on stop
++        mock_loopcall.side_effect = (
++            mock.Mock(**{'stop.side_effect': Exception}),
++            mock.Mock())
++
++        serv.start()
++        serv.stop()
++
++        self.assertEqual(serv.timers, [])
++        serv.wait()
++
++        serv.rpcserver.start.assert_called_once_with()
++        serv.rpcserver.stop.assert_called_once_with()
++        serv.rpcserver.wait.assert_called_once_with()
++
++        self.assertEqual(serv.timers, [])
++
+     @mock.patch('cinder.manager.Manager.init_host')
+     @mock.patch.object(service.loopingcall, 'FixedIntervalLoopingCall')
+     @mock.patch('oslo_messaging.Target')
+-- 
+2.7.4
+

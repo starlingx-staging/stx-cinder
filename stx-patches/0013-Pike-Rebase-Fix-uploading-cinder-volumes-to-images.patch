@@ -1,0 +1,172 @@
+From bd12023275d0cf480d97eb0915c0cec3f7462121 Mon Sep 17 00:00:00 2001
+From: Stefan Dinescu <stefan.dinescu@windriver.com>
+Date: Fri, 9 Dec 2016 17:48:41 +0000
+Subject: [PATCH 13/53] Pike Rebase: Fix uploading cinder volumes to images
+
+Due to 72c727404d657197cc8f444ad3dcbdcb9aff8c79 glance commit,
+uploading cinder volumes to glance was not working due to
+cinder not sending a proper size.
+
+This fix will make cinder always send a size to glance.
+Glance will also add a check for no size received and
+properly translate it to a zero value.
+
+(cherry picked from commit 05434895370bc40bf6541011c047f333ebf6a3ba)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/image/glance.py                 |  9 ++++++---
+ cinder/image/image_utils.py            | 20 +++++++++++++++++---
+ cinder/tests/unit/glance/stubs.py      |  2 +-
+ cinder/tests/unit/image/test_glance.py |  3 ++-
+ cinder/tests/unit/test_image_utils.py  |  7 ++++---
+ cinder/volume/api.py                   |  6 ++++++
+ 6 files changed, 36 insertions(+), 11 deletions(-)
+
+diff --git a/cinder/image/glance.py b/cinder/image/glance.py
+index 669ab4b..9089552 100644
+--- a/cinder/image/glance.py
++++ b/cinder/image/glance.py
+@@ -417,7 +417,8 @@ class GlanceImageService(object):
+             # NOTE(dosaboy): the v2 api separates update from upload
+             if CONF.glance_api_version > 1:
+                 if data:
+-                    self._client.call(context, 'upload', image_id, data)
++                    self._client.call(context, 'upload', image_id, data,
++                                      len(data))
+                 if image_meta:
+                     if purge_props:
+                         # Properties to remove are those not specified in
+@@ -427,8 +428,10 @@ class GlanceImageService(object):
+                         remove_props = list(set(cur_props) -
+                                             set(props_to_update))
+                         image_meta['remove_props'] = remove_props
+-                    image_meta = self._client.call(context, 'update', image_id,
+-                                                   **image_meta)
++                    image_meta = self._client.call(
++                        context, 'update', image_id,
++                        **dict(image_meta,
++                               image_size=image_meta.get('size', 0)))
+                 else:
+                     image_meta = self._client.call(context, 'get', image_id)
+             else:
+diff --git a/cinder/image/image_utils.py b/cinder/image/image_utils.py
+index 3931cbc..b3f3020 100644
+--- a/cinder/image/image_utils.py
++++ b/cinder/image/image_utils.py
+@@ -443,11 +443,17 @@ def upload_volume(context, image_service, image_meta, volume_path,
+                   image_id, volume_format, image_meta['disk_format'])
+         if os.name == 'nt' or os.access(volume_path, os.R_OK):
+             with open(volume_path, 'rb') as image_file:
+-                image_service.update(context, image_id, {}, image_file)
++                image_service.update(
++                    context, image_id,
++                    {"size": image_meta.get("size", 0)},
++                    image_file)
+         else:
+             with utils.temporary_chown(volume_path):
+                 with open(volume_path, 'rb') as image_file:
+-                    image_service.update(context, image_id, {}, image_file)
++                    image_service.update(
++                        context, image_id,
++                        {"size": image_meta.get("size", 0)},
++                        image_file)
+         return
+ 
+     with temporary_file() as tmp:
+@@ -485,8 +491,16 @@ def upload_volume(context, image_service, image_meta, volume_path,
+                 reason=_("Converted to %(f1)s, but format is now %(f2)s") %
+                 {'f1': out_format, 'f2': data.file_format})
+ 
++        # qemu_img_info round the size of the of the image created.
++        # For the upload process we need the exact size of the file size
++        # so we get it from the opened file
+         with open(tmp, 'rb') as image_file:
+-            image_service.update(context, image_id, {}, image_file)
++            old_file_position = image_file.tell()
++            image_file.seek(0, os.SEEK_END)
++            file_size = image_file.tell()
++            image_file.seek(old_file_position, os.SEEK_SET)
++            image_service.update(context, image_id,
++                                 {"size": file_size}, image_file)
+ 
+ 
+ def check_virtual_size(virtual_size, volume_size, image_id):
+diff --git a/cinder/tests/unit/glance/stubs.py b/cinder/tests/unit/glance/stubs.py
+index b1b18a6..064db4a 100644
+--- a/cinder/tests/unit/glance/stubs.py
++++ b/cinder/tests/unit/glance/stubs.py
+@@ -103,7 +103,7 @@ class StubGlanceClient(object):
+                 return
+         raise glanceclient.exc.NotFound(image_id)
+ 
+-    def upload(self, image_id, data):
++    def upload(self, image_id, data, image_size):
+         for i, image in enumerate(self._images):
+             if image.id == image_id:
+                 setattr(self._images[i], 'size', len(data))
+diff --git a/cinder/tests/unit/image/test_glance.py b/cinder/tests/unit/image/test_glance.py
+index 8a4a29f..3fbbb42 100644
+--- a/cinder/tests/unit/image/test_glance.py
++++ b/cinder/tests/unit/image/test_glance.py
+@@ -424,7 +424,8 @@ class TestGlanceImageService(test.TestCase):
+         self.assertDictEqual(image_meta, ret)
+         if ver == 2:
+             client.call.assert_called_once_with(
+-                self.context, 'update', image_id, k1='v1', remove_props=['k2'])
++                self.context, 'update', image_id, k1='v1', remove_props=['k2'],
++                image_size = 0)
+         else:
+             client.call.assert_called_once_with(
+                 self.context, 'update', image_id, properties={'k1': 'v1'},
+diff --git a/cinder/tests/unit/test_image_utils.py b/cinder/tests/unit/test_image_utils.py
+index bf0737d..9a4a728 100644
+--- a/cinder/tests/unit/test_image_utils.py
++++ b/cinder/tests/unit/test_image_utils.py
+@@ -503,7 +503,8 @@ class TestUploadVolume(test.TestCase):
+         self.assertEqual(2, mock_info.call_count)
+         mock_open.assert_called_once_with(temp_file, 'rb')
+         image_service.update.assert_called_once_with(
+-            ctxt, image_meta['id'], {},
++            ctxt, image_meta['id'],
++            {'size': mock_open.return_value.__enter__().tell()},
+             mock_open.return_value.__enter__.return_value)
+ 
+     @mock.patch('cinder.image.image_utils.utils.temporary_chown')
+@@ -532,7 +533,7 @@ class TestUploadVolume(test.TestCase):
+         mock_chown.assert_called_once_with(volume_path)
+         mock_open.assert_called_once_with(volume_path, 'rb')
+         image_service.update.assert_called_once_with(
+-            ctxt, image_meta['id'], {},
++            ctxt, image_meta['id'], {'size': 0},
+             mock_open.return_value.__enter__.return_value)
+ 
+     @mock.patch('cinder.image.image_utils.utils.temporary_chown')
+@@ -560,7 +561,7 @@ class TestUploadVolume(test.TestCase):
+         self.assertFalse(mock_info.called)
+         mock_open.assert_called_once_with(volume_path, 'rb')
+         image_service.update.assert_called_once_with(
+-            ctxt, image_meta['id'], {},
++            ctxt, image_meta['id'], {'size': 0},
+             mock_open.return_value.__enter__.return_value)
+ 
+     @mock.patch('cinder.image.image_utils.CONF')
+diff --git a/cinder/volume/api.py b/cinder/volume/api.py
+index 0a2a128..8e4625e 100644
+--- a/cinder/volume/api.py
++++ b/cinder/volume/api.py
+@@ -1347,6 +1347,12 @@ class API(base.Base):
+ 
+             recv_metadata = self.image_service.create(
+                 context, self.image_service._translate_to_glance(metadata))
++
++            # glance must also receive the size of the file that it need
++            # to upload. For this we use the volume size and transform it
++            # from GiBs to bytes
++            recv_metadata['size'] = int(volume.get('size', 0)) * 1024 ** 3
++
+         except Exception:
+             # NOTE(geguileo): To mimic behavior before conditional_update we
+             # will rollback status if image create fails
+-- 
+2.7.4
+

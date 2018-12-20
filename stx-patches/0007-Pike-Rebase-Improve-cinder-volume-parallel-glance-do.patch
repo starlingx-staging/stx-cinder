@@ -1,0 +1,311 @@
+From 1cf58fa10683b1193cf93a5031ed2833e2fa8966 Mon Sep 17 00:00:00 2001
+From: Jim Gauld <james.gauld@windriver.com>
+Date: Sat, 16 Jan 2016 02:24:29 -0500
+Subject: [PATCH 07/53] Pike Rebase: Improve cinder-volume parallel glance
+ downloads impact to system
+
+Creating many cinder-volumes in parallel creates a high IO load to sda
+when glance images are being downloaded to temporary image conversion directory.
+This was causing significant IO delay that was leading to failures,
+and autonomous swact.
+
+All glance downloads in progress will now call fdatasync() once a configurable
+amount of image data has accumulated (eg, 225 MiB). This has new configuration
+parameter 'glance_download_fdatasync_interval_mib'. Setting too low will
+dramatically slow write throughput.
+
+Added a time.sleep(0) scheduler yield in the tight write loop within glance
+download. This gives other greenthreads a chance to schedule, and equally
+distributes the work of the downloads. Using non-zero sleep (eg., 1ms)
+also very much reduces IO latency impact because it causes write throttling,
+but that signficantly lowers potential throughput of fast hardware (eg. ssd).
+
+Both of these changes smooth out the behaviour of the downloads.
+The fdatasync at regular write intervals prevents huge backlog of pending
+IO in linux dirty page-cache. This helps prevent cinder-volume writes from
+starving out other IO (eg., postgres).
+
+Note that as alternative to fdatasync(), setting O_DIRECT flag in the write
+loop was also prototyped, but found to have very poor performance in this
+specific case, due to very low concurrency (eg., 1.0). This could in theory
+be improved by decoupling read and write threads, but that becomes very
+complex.
+
+This fix also delete stale tmp* files in image conversions directory
+when cinder-volume is started. Leftover files can occur in scenarios such
+as when there are in-progress cinder-volumes doing glance downloads,
+and that gets interrupted due to: dead office recovery, cinder-volume
+process gets killed, controller swact.
+
+(cherry picked from commit 5aedcf614eb56c6de31dc33b7b1e683a0a6a9dcd)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/image/glance.py                     | 47 ++++++++++++++++++++++++++++--
+ cinder/image/image_utils.py                | 17 +++++++++++
+ cinder/tests/unit/image/test_glance.py     |  3 ++
+ cinder/tests/unit/test_volume_cleanup.py   | 25 ++++++++++++----
+ cinder/tests/unit/volume/test_init_host.py |  9 ++++--
+ cinder/volume/drivers/lvm.py               |  5 ++++
+ 6 files changed, 96 insertions(+), 10 deletions(-)
+
+diff --git a/cinder/image/glance.py b/cinder/image/glance.py
+index ee4b2cc..669ab4b 100644
+--- a/cinder/image/glance.py
++++ b/cinder/image/glance.py
+@@ -21,6 +21,7 @@ from __future__ import absolute_import
+ 
+ import copy
+ import itertools
++import os
+ import random
+ import shutil
+ import sys
+@@ -31,6 +32,7 @@ from oslo_config import cfg
+ from oslo_log import log as logging
+ from oslo_serialization import jsonutils
+ from oslo_utils import timeutils
++from oslo_utils import units
+ import six
+ from six.moves import range
+ from six.moves import urllib
+@@ -51,6 +53,10 @@ glance_opts = [
+                     'catalog. Format is: separated values of the form: '
+                     '<service_type>:<service_name>:<endpoint_type> - '
+                     'Only used if glance_api_servers are not provided.'),
++    cfg.IntOpt('glance_download_fdatasync_interval_mib',
++               default=225,
++               help='All glance downloads in progress will call fdatasync() '
++                    'once this much image data has accumulated, in MiB.'),
+ ]
+ glance_core_properties_opts = [
+     cfg.ListOpt('glance_core_properties',
+@@ -66,6 +72,10 @@ CONF.import_opt('glance_api_version', 'cinder.common.config')
+ 
+ LOG = logging.getLogger(__name__)
+ 
++# glance download chunk counter and tracking
++_chunk_count = 0
++_do_sync = {}
++
+ 
+ def _parse_image_ref(image_href):
+     """Parse an image href into composite parts.
+@@ -338,8 +348,41 @@ class GlanceImageService(object):
+         if not data:
+             return image_chunks
+         else:
+-            for chunk in image_chunks:
+-                data.write(chunk)
++            if not CONF.glance_download_fdatasync_interval_mib:
++                for chunk in image_chunks:
++                    data.write(chunk)
++                    # Give other greenthreads a chance to schedule.
++                    time.sleep(0)
++            else:
++                # Force fdatasync at regular write intervals to prevent huge
++                # backlog of pending IO in linux dirty page-cache. This helps
++                # prevent cinder-volume writes from starving out other IO.
++                # Setting the fdatasync interval too small will dramatically
++                # slow write throughput.
++                global _chunk_count
++                global _do_sync
++
++                this_fd = data.fileno()
++                _do_sync[this_fd] = False
++                chunksize = 0
++                for chunk in image_chunks:
++                    if chunksize == 0:
++                        chunksize = len(chunk)
++                        fdatasync_interval = units.Mi * \
++                            CONF.glance_download_fdatasync_interval_mib / \
++                            chunksize
++                    _chunk_count += 1
++                    data.write(chunk)
++                    if _chunk_count % fdatasync_interval == 0:
++                        for _fd in _do_sync:
++                            _do_sync[_fd] = True
++                    if _do_sync[this_fd]:
++                        data.flush()
++                        os.fdatasync(data)
++                        _do_sync[this_fd] = False
++                    # Give other greenthreads a chance to schedule.
++                    time.sleep(0)
++                del _do_sync[this_fd]
+ 
+     def create(self, context, image_meta, data=None):
+         """Store the image data and return the new image object."""
+diff --git a/cinder/image/image_utils.py b/cinder/image/image_utils.py
+index 8c5988f..3931cbc 100644
+--- a/cinder/image/image_utils.py
++++ b/cinder/image/image_utils.py
+@@ -604,6 +604,23 @@ def temporary_dir():
+     return utils.tempdir(dir=CONF.image_conversion_dir)
+ 
+ 
++def cleanup_temporary_dir():
++    """Cleanup lingering temporary image conversion files.
++
++    tmp* files are not deleted in a few scenarios. E.g., glance downloads in
++    progress, then something happens to restart cinder-volume, such as:
++    controller swact, dead office recovery, killing cinder-volume process.
++    Only call this routine during initialization.
++    """
++    if (CONF.image_conversion_dir and
++            os.path.exists(CONF.image_conversion_dir)):
++        for f in os.listdir(CONF.image_conversion_dir):
++            if f.startswith('tmp'):
++                path = os.path.join(CONF.image_conversion_dir, f)
++                LOG.info("cleanup: deleting: %s", path)
++                os.remove(path)
++
++
+ def coalesce_chain(vhd_chain):
+     for child, parent in zip(vhd_chain[:-1], vhd_chain[1:]):
+         with temporary_dir() as directory_for_journal:
+diff --git a/cinder/tests/unit/image/test_glance.py b/cinder/tests/unit/image/test_glance.py
+index 0724450..8a4a29f 100644
+--- a/cinder/tests/unit/image/test_glance.py
++++ b/cinder/tests/unit/image/test_glance.py
+@@ -38,6 +38,9 @@ class NullWriter(object):
+     def write(self, *arg, **kwargs):
+         pass
+ 
++    def fileno(self, *arg, **kwargs):
++        return 11
++
+ 
+ class TestGlanceSerializer(test.TestCase):
+     def test_serialize(self):
+diff --git a/cinder/tests/unit/test_volume_cleanup.py b/cinder/tests/unit/test_volume_cleanup.py
+index 190e9ea..b40e237 100644
+--- a/cinder/tests/unit/test_volume_cleanup.py
++++ b/cinder/tests/unit/test_volume_cleanup.py
+@@ -43,8 +43,10 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+         workers = db.worker_get_all(self.context, read_deleted='yes')
+         self.assertListEqual([], workers)
+ 
+-    def test_init_host_clears_uploads_available_volume(self):
++    @mock.patch('os.listdir')
++    def test_init_host_clears_uploads_available_volume(self, mock_listdir):
+         """init_host will clean an available volume stuck in uploading."""
++        mock_listdir.return_value = []
+         volume = tests_utils.create_volume(self.context, status='uploading',
+                                            size=0, host=CONF.host)
+ 
+@@ -77,9 +79,12 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+         self.assertEqual("in-use", volume.status)
+         self._assert_workers_are_removed()
+ 
++    @mock.patch('os.listdir')
+     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
+-    def test_init_host_clears_downloads(self, mock_cleanup_tmp_file):
++    def test_init_host_clears_downloads(self, mock_cleanup_tmp_file,
++                                        mock_listdir):
+         """Test that init_host will unwedge a volume stuck in downloading."""
++        mock_listdir.return_value = []
+         volume = tests_utils.create_volume(self.context, status='downloading',
+                                            size=0, host=CONF.host)
+         db.worker_create(self.context, resource_type='Volume',
+@@ -97,9 +102,12 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+         self.volume.delete_volume(self.context, volume=volume)
+         self._assert_workers_are_removed()
+ 
++    @mock.patch('os.listdir')
+     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
+-    def test_init_host_resumes_deletes(self, mock_cleanup_tmp_file):
++    def test_init_host_resumes_deletes(self, mock_cleanup_tmp_file,
++                                       mock_listdir):
+         """init_host will resume deleting volume in deleting status."""
++        mock_listdir.return_value = []
+         volume = tests_utils.create_volume(self.context, status='deleting',
+                                            size=0, host=CONF.host)
+ 
+@@ -114,15 +122,17 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+         mock_cleanup_tmp_file.assert_called_once_with(CONF.host)
+         self._assert_workers_are_removed()
+ 
++    @mock.patch('os.listdir')
+     @mock.patch('cinder.image.image_utils.cleanup_temporary_file')
+     def test_create_volume_fails_with_creating_and_downloading_status(
+-            self, mock_cleanup_tmp_file):
++            self, mock_cleanup_tmp_file, mock_listdir):
+         """Test init_host_with_service in case of volume.
+ 
+         While the status of volume is 'creating' or 'downloading',
+         volume process down.
+         After process restarting this 'creating' status is changed to 'error'.
+         """
++        mock_listdir.return_value = []
+         for status in ('creating', 'downloading'):
+             volume = tests_utils.create_volume(self.context, status=status,
+                                                size=0, host=CONF.host)
+@@ -139,7 +149,8 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+             self.assertTrue(mock_cleanup_tmp_file.called)
+             self._assert_workers_are_removed()
+ 
+-    def test_create_snapshot_fails_with_creating_status(self):
++    @mock.patch('os.listdir')
++    def test_create_snapshot_fails_with_creating_status(self, mock_listdir):
+         """Test init_host_with_service in case of snapshot.
+ 
+         While the status of snapshot is 'creating', volume process
+@@ -168,8 +179,10 @@ class VolumeCleanupTestCase(base.BaseVolumeTestCase):
+         self.volume.delete_snapshot(self.context, snapshot_obj)
+         self.volume.delete_volume(self.context, volume)
+ 
+-    def test_init_host_clears_deleting_snapshots(self):
++    @mock.patch('os.listdir')
++    def test_init_host_clears_deleting_snapshots(self, mock_listdir):
+         """Test that init_host will delete a snapshot stuck in deleting."""
++        mock_listdir.return_value = []
+         volume = tests_utils.create_volume(self.context, status='deleting',
+                                            size=1, host=CONF.host)
+         snapshot = tests_utils.create_snapshot(self.context,
+diff --git a/cinder/tests/unit/volume/test_init_host.py b/cinder/tests/unit/volume/test_init_host.py
+index c835333..f2bd4de 100644
+--- a/cinder/tests/unit/volume/test_init_host.py
++++ b/cinder/tests/unit/volume/test_init_host.py
+@@ -35,8 +35,11 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
+         super(VolumeInitHostTestCase, self).setUp()
+         self.service_id = 1
+ 
++    @mock.patch('os.listdir')
+     @mock.patch('cinder.manager.CleanableManager.init_host')
+-    def test_init_host_count_allocated_capacity(self, init_host_mock):
++    def test_init_host_count_allocated_capacity(self, init_host_mock,
++                                                mock_listdir):
++        mock_listdir.return_value = []
+         vol0 = tests_utils.create_volume(
+             self.context, size=100, host=CONF.host)
+         vol1 = tests_utils.create_volume(
+@@ -120,8 +123,10 @@ class VolumeInitHostTestCase(base.BaseVolumeTestCase):
+         self.assertEqual(
+             1024, stats['pools']['pool2']['allocated_capacity_gb'])
+ 
++    @mock.patch('os.listdir')
+     @mock.patch.object(driver.BaseVD, "update_provider_info")
+-    def test_init_host_sync_provider_info(self, mock_update):
++    def test_init_host_sync_provider_info(self, mock_update, mock_listdir):
++        mock_listdir.return_value = []
+         vol0 = tests_utils.create_volume(
+             self.context, size=1, host=CONF.host)
+         vol1 = tests_utils.create_volume(
+diff --git a/cinder/volume/drivers/lvm.py b/cinder/volume/drivers/lvm.py
+index a2900f3..f8ebbf4 100644
+--- a/cinder/volume/drivers/lvm.py
++++ b/cinder/volume/drivers/lvm.py
+@@ -130,6 +130,11 @@ class LVMVolumeDriver(driver.VolumeDriver):
+             self.configuration.max_over_subscription_ratio = \
+                 self.configuration.lvm_max_over_subscription_ratio
+ 
++    def do_setup(self, context):
++        LOG.debug("LVMVolumeDriver do_setup called.")
++        """Cleanup the volume driver does while starting."""
++        image_utils.cleanup_temporary_dir()
++
+     def _sizestr(self, size_in_g):
+         return '%sg' % size_in_g
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,139 @@
+From df85f445360011695e39caa2363ab388e2d76d8a Mon Sep 17 00:00:00 2001
+From: Vu Tran <vu.tran@windriver.com>
+Date: Thu, 29 Sep 2016 14:51:34 -0400
+Subject: [PATCH 12/53] Pike Rebase: cinder-scheduler and cinder-volume take
+ long time to shutdown
+
+This is because on the shutting down path, cinder Service class waits
+for periodic tasks to finish.  There are couple of different way to
+reduce the shutdown time:
+
+* Reduce the cinder config options report_interval and periodic_interval
+* Change cinder Service not to wait for periodic task (
+by reverting commit 598e35c337c6acf0f7558a874e85c727fc0fbde2)
+
+We decide to revert the commit 598e35c337c6acf0f7558a874e85c727fc0fbde2.
+
+Revert "Wait for periodic tasks to stop on exit"
+
+This reverts commit 598e35c337c6acf0f7558a874e85c727fc0fbde2:
+
+   Wait for periodic tasks to stop on exit
+
+   When a Service in Cinder exits it stops all operations and waits for
+   them to complete, and it also stops all periodica tasks created with
+   FixedIntervalLoop, but it doesn't wait until these are completed.
+
+   This patch will wait for all periodic tasks that received the stop
+   request without raising an exception before exiting.
+
+   Change-Id: I984b8aebd40f9482f0cf8098146d1ccd635dc1d6
+   Closes-Bug: #1546234
+
+Conflicts:
+    cinder/service.py
+
+Please note that the other commit  6daa6ad3f528330d97b85c3eebfc494fc07a2f95
+which invokes wait() from the base Service class from oslo_service
+package which will cause the delay if cinder service uses some
+wait-based services/feature provided by the base class.  Fortunately,
+right now cinder service doesn't use any of these wait-based
+services/feature therefore this upstream commit does not cause
+the delay on shutdown.
+
+(cherry picked from commit ad687592e32f1c31d519c2a43033c167ebf890f4)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/service.py                 | 12 +++++-------
+ cinder/tests/unit/test_service.py | 41 ---------------------------------------
+ 2 files changed, 5 insertions(+), 48 deletions(-)
+
+diff --git a/cinder/service.py b/cinder/service.py
+index 9eaf565..1c71868 100644
+--- a/cinder/service.py
++++ b/cinder/service.py
+@@ -461,7 +461,6 @@ class Service(service.Service):
+         except Exception:
+             pass
+ 
+-        self.timers_skip = []
+         for x in self.timers:
+             try:
+                 x.stop()
+@@ -473,16 +472,15 @@ class Service(service.Service):
+                 coordination.COORDINATOR.stop()
+             except Exception:
+                 pass
++        self.timers = []
+         super(Service, self).stop(graceful=True)
+ 
+     def wait(self):
+-        skip = getattr(self, 'timers_skip', [])
+         for x in self.timers:
+-            if x not in skip:
+-                try:
+-                    x.wait()
+-                except Exception:
+-                    pass
++            try:
++                x.wait()
++            except Exception:
++                pass
+         if self.rpcserver:
+             self.rpcserver.wait()
+         if self.backend_rpcserver:
+diff --git a/cinder/tests/unit/test_service.py b/cinder/tests/unit/test_service.py
+index 139e0dd..4944f0d 100644
+--- a/cinder/tests/unit/test_service.py
++++ b/cinder/tests/unit/test_service.py
+@@ -302,47 +302,6 @@ class ServiceTestCase(test.TestCase):
+         serv.rpcserver.stop.assert_called_once_with()
+         serv.rpcserver.wait.assert_called_once_with()
+ 
+-    @mock.patch('cinder.service.Service.report_state')
+-    @mock.patch('cinder.service.Service.periodic_tasks')
+-    @mock.patch.object(service.loopingcall, 'FixedIntervalLoopingCall')
+-    @mock.patch.object(rpc, 'get_server')
+-    @mock.patch('cinder.db')
+-    def test_service_stop_waits_for_timers(self, mock_db, mock_rpc,
+-                                           mock_loopcall, mock_periodic,
+-                                           mock_report):
+-        """Test that we wait for loopcalls only if stop succeeds."""
+-        serv = service.Service(
+-            self.host,
+-            self.binary,
+-            self.topic,
+-            'cinder.tests.unit.test_service.FakeManager',
+-            report_interval=5,
+-            periodic_interval=10,
+-        )
+-
+-        # One of the loopcalls will raise an exception on stop
+-        mock_loopcall.side_effect = (
+-            mock.Mock(**{'stop.side_effect': Exception}),
+-            mock.Mock())
+-
+-        serv.start()
+-        serv.stop()
+-        serv.wait()
+-        serv.rpcserver.start.assert_called_once_with()
+-        serv.rpcserver.stop.assert_called_once_with()
+-        serv.rpcserver.wait.assert_called_once_with()
+-
+-        # The first loopcall will have failed on the stop call, so we will not
+-        # have waited for it to stop
+-        self.assertEqual(1, serv.timers[0].start.call_count)
+-        self.assertEqual(1, serv.timers[0].stop.call_count)
+-        self.assertFalse(serv.timers[0].wait.called)
+-
+-        # We will wait for the second loopcall
+-        self.assertEqual(1, serv.timers[1].start.call_count)
+-        self.assertEqual(1, serv.timers[1].stop.call_count)
+-        self.assertEqual(1, serv.timers[1].wait.call_count)
+-
+     @mock.patch('cinder.manager.Manager.init_host')
+     @mock.patch.object(service.loopingcall, 'FixedIntervalLoopingCall')
+     @mock.patch('oslo_messaging.Target')
+-- 
+2.7.4
+

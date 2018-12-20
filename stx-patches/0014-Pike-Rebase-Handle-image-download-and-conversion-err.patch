@@ -1,0 +1,107 @@
+From c45bb0ec4aeeaa7872d32b0c3c671f11e6f06e48 Mon Sep 17 00:00:00 2001
+From: Irina Mihai <irina.mihai@windriver.com>
+Date: Fri, 23 Dec 2016 14:01:07 +0200
+Subject: [PATCH 14/53] Pike Rebase: Handle image download and conversion
+ errors
+
+Provide message when there is not enough space for image conversion
+
+===
+
+Bugzilla-185, image download and conversion error
+
+When booting a VM instance with block device mapping, two steps
+follow to create the volume:
+
+1. image is downloaded to /opt/img-conversions/cinder
+2. image is converted to raw in the same location
+
+The problem found is that only step 2 is raising an error if not
+enough space is available at '/opt/img-conversions/'. This fix is
+also raising an error to handle download error at step 1. The error
+message proposed is: "Error creating volume. Failed to create volume
+from image. Insufficient free space on /opt/img-conversions for
+download and conversion". This error will be displayed in the volume
+metadata and in cinder-volume.log.
+
+(cherry picked from commit 88de33a00494f31a7b8c97972f2621c835c81c32)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/exception.py                          |  5 +++++
+ cinder/image/image_utils.py                  | 16 +++++++++++++++-
+ cinder/volume/flows/manager/create_volume.py | 19 +++++++++++++++++++
+ 3 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/cinder/exception.py b/cinder/exception.py
+index c5fe32c..8072bf1 100644
+--- a/cinder/exception.py
++++ b/cinder/exception.py
+@@ -1450,3 +1450,8 @@ class LVMThinPoolCapacityError(CinderException):
+                 "%(provisioned_ratio).2f has exceeded the maximum over "
+                 "subscription ratio %(oversub_ratio).2f on host "
+                 "%(host)s.")
++
++
++class InsufficientConversionSpace(CinderException):
++    message = _("Insufficient free space on %(location)s "
++                "for image download and conversion.")
+diff --git a/cinder/image/image_utils.py b/cinder/image/image_utils.py
+index b3f3020..49903e9 100644
+--- a/cinder/image/image_utils.py
++++ b/cinder/image/image_utils.py
+@@ -162,7 +162,21 @@ def _convert_image(prefix, source, dest, out_format,
+         cmd += ('-O', out_format, source, dest)
+ 
+     start_time = timeutils.utcnow()
+-    utils.execute(*cmd, run_as_root=run_as_root)
++
++    # If there is not enough space on the conversion partition, include
++    # the partitions's name in the error message.
++    try:
++        utils.execute(*cmd, run_as_root=run_as_root)
++    except processutils.ProcessExecutionError as ex:
++        if "No space left" in ex.stderr and CONF.image_conversion_dir in dest:
++            conversion_dir = CONF.image_conversion_dir
++            while not os.path.ismount(conversion_dir):
++                conversion_dir = os.path.dirname(conversion_dir)
++
++            raise exception.InsufficientConversionSpace(
++                location=conversion_dir)
++        raise
++
+     duration = timeutils.delta_seconds(start_time, timeutils.utcnow())
+ 
+     # NOTE(jdg): use a default of 1, mostly for unit test, but in
+diff --git a/cinder/volume/flows/manager/create_volume.py b/cinder/volume/flows/manager/create_volume.py
+index 5c3c944..1cd54b4 100644
+--- a/cinder/volume/flows/manager/create_volume.py
++++ b/cinder/volume/flows/manager/create_volume.py
+@@ -838,6 +838,25 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
+                                                               volume,
+                                                               image_id,
+                                                               image_meta)
++
++        except IOError as e:
++            if "No space left" in six.text_type(e):
++                conversion_dir = CONF.image_conversion_dir
++                while not os.path.ismount(conversion_dir):
++                    conversion_dir = os.path.dirname(conversion_dir)
++                errmsg = (_("Error creating volume. "
++                            "Failed to create volume from image. "
++                            "Insufficient free space on %s for image"
++                            " download and conversion.") % conversion_dir)
++                LOG.error(errmsg)
++                volume_utils.update_volume_fault(
++                    context,
++                    volume.id,
++                    errmsg,
++                    sys.exc_info())
++                raise exception.InsufficientConversionSpace(
++                    location=conversion_dir)
++            raise
+         finally:
+             # If we created the volume as the minimal size, extend it back to
+             # what was originally requested. If an exception has occurred or
+-- 
+2.7.4
+

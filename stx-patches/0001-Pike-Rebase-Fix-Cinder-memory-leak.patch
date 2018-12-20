@@ -1,0 +1,65 @@
+From 294a63c821233e3307f142965f366e8eb3d0c1de Mon Sep 17 00:00:00 2001
+From: Ovidiu Poncea <ovidiu.poncea@windriver.com>
+Date: Tue, 23 Jun 2015 15:39:32 +0300
+Subject: [PATCH 01/53] Pike Rebase: Fix Cinder memory leak
+
+fix_cinder_memory_leak + add exception handling in
+case the fix is not implemented in novaclient for unit testing
+to pass.
+
+(cherry picked from commit 60e68aec8e7cc48aad83ce0d69214f6c6a297e02)
+Signed-off-by: Robert Church <robert.church@windriver.com>
+---
+ cinder/compute/nova.py | 13 +++++++++++++
+ cinder/opts.py         |  4 ++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/cinder/compute/nova.py b/cinder/compute/nova.py
+index 43274df..db0a04c 100644
+--- a/cinder/compute/nova.py
++++ b/cinder/compute/nova.py
+@@ -81,6 +81,13 @@ CONF.register_opts(nova_opts, group=NOVA_GROUP)
+ CONF.register_opts(nova_session_opts, group=NOVA_GROUP)
+ CONF.register_opts(nova_auth_opts, group=NOVA_GROUP)
+ 
++nova_client_opts = [
++    cfg.IntOpt('max_timing_buffer',
++               default=200,
++               help='The max number of the timing objects to keep'),
++]
++CONF.register_opts(nova_client_opts, group="nova_client")
++
+ LOG = logging.getLogger(__name__)
+ 
+ NOVA_API_VERSION = "2.1"
+@@ -164,6 +171,12 @@ def novaclient(context, privileged_user=False, timeout=None, api_version=None):
+         global_request_id=context.global_id,
+         extensions=nova_extensions)
+ 
++    try:
++        c.set_timings_max_len(CONF.nova_client.max_timing_buffer)
++    except AttributeError as e:
++        LOG.error('fix_cinder_memory_leak was not applied to '
++                  'nova_client: %s', e)
++
+     return c
+ 
+ 
+diff --git a/cinder/opts.py b/cinder/opts.py
+index 956a4ae..5cccaf2 100644
+--- a/cinder/opts.py
++++ b/cinder/opts.py
+@@ -290,6 +290,10 @@ def list_opts():
+             itertools.chain(
+                 cinder_keymgr_confkeymgr.key_mgr_opts,
+             )),
++        ('NOVA_CLIENT',
++            itertools.chain(
++                cinder_compute_nova.nova_client_opts,
++            )),
+         ('backend_defaults',
+             itertools.chain(
+                 cinder_volume_driver.volume_opts,
+-- 
+2.7.4
+
